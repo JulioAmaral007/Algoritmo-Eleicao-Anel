@@ -1,0 +1,9 @@
+# Dependências do projeto "Algoritmo de Eleição em Anel" — Grupo 8
+#
+# A interface visual usa Streamlit. Toda a comunicação entre os nós usa apenas
+# a biblioteca padrão do Python (socket, threading, json) — não precisa instalar
+# nada além do Streamlit para rodar a demonstração.
+#
+# Instale com:   pip install -r requirements.txt
+
+streamlit>=1.37
