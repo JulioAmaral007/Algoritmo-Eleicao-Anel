@@ -180,10 +180,15 @@ sequenceDiagram
 
 ## 6. Como o serviço é executado no servidor
 
-Quando um nó é ligado (`Node.iniciar()`), ele sobe **duas threads de fundo**:
+Quando um nó é ligado (`Node.iniciar()`), ele **cria e abre o socket de escuta
+ali mesmo** — faz o `bind`/`listen` de forma síncrona, **antes** de subir as
+threads. Isso é importante: se a porta estiver ocupada, a falha é percebida na
+hora (vira um log de erro) em vez de morrer em silêncio dentro de uma thread de
+fundo — o que deixaria o nó "ativo" porém surdo e quebraria o anel sem aviso.
+Com o socket já pronto, o nó sobe **duas threads de fundo**:
 
-1. **Thread do servidor** (`_loop_servidor`): cria o socket, fica em `accept()`
-   e, para cada conexão recebida, trata a mensagem conforme o `tipo`.
+1. **Thread do servidor** (`_loop_servidor`): apenas fica em `accept()` e, para
+   cada conexão recebida, trata a mensagem conforme o `tipo`.
 2. **Thread do monitor** (`_loop_monitor`): de tempos em tempos envia um `PING`
    ao líder; se não vier `PONG`, conclui que o líder caiu e **inicia uma nova
    eleição**.

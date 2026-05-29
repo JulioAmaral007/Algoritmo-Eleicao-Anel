@@ -8,8 +8,16 @@ Cobre tres cenarios:
   2. Falha do lider   -> deteccao automatica + nova eleicao.
   3. Volta do no caido -> nova eleicao manual reelege o maior id.
 """
+import sys
 import time
 from node import Rede
+
+# No Windows o console usa cp1252 e quebra ao imprimir emojis dos logs.
+# Forçamos UTF-8 na saída para a demonstração funcionar em qualquer SO.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 # Anel com 4 nos: ids 1,2,3,4 (o maior id = 4 deve vencer)
 rede = Rede(ids=[1, 2, 3, 4], porta_base=5301, passo_delay=0.05)

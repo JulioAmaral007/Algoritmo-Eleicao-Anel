@@ -62,9 +62,40 @@ class Node:
     # ------------------------------------------------------------------ #
 
     def iniciar(self):
-        """Liga o nó: começa a escutar (servidor) e a monitorar o líder."""
+        """Liga o nó: começa a escutar (servidor) e a monitorar o líder.
+
+        IMPORTANTE: o socket é criado e BINDADO aqui (na thread que chamou
+        iniciar), ANTES de subir as threads de fundo. Antes ele era criado lá
+        dentro do _loop_servidor, o que causava dois bugs:
+          1. se o bind falhasse (porta ocupada), a exceção morria em silêncio
+             dentro da thread daemon — o nó "parecia" vivo (ativo=True), mas não
+             escutava nada, e o anel quebrava sem aviso;
+          2. uma corrida entre iniciar()/derrubar() podia deixar um socket
+             bindado e nunca fechado (vazamento de porta -> WinError 10048).
+        Criando e bindando aqui, falhas são percebidas NA HORA e derrubar()
+        sempre encontra um socket real para fechar.
+        """
         if self.ativo:
             return
+
+        servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Em Unix, SO_REUSEADDR libera a porta logo após o close (evita TIME_WAIT
+        # ao religar o mesmo nó). No Windows NÃO usamos SO_REUSEADDR (lá ele
+        # permitiria DOUBLE-BIND na mesma porta); o reset seguro no Windows é
+        # garantido pela interface, que usa uma FAIXA DE PORTAS NOVA a cada anel.
+        if sys.platform != "win32":
+            servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            servidor.bind((self.host, self.porta))
+            servidor.listen()
+        except OSError as erro:
+            servidor.close()
+            self.log(f"❌ Nó {self.id} não conseguiu escutar na porta "
+                     f"{self.porta}: {erro}", tipo="falha")
+            return
+
+        self._socket_servidor = servidor
         self.ativo = True
         self._thread_servidor = threading.Thread(target=self._loop_servidor, daemon=True)
         self._thread_servidor.start()
@@ -87,9 +118,11 @@ class Node:
         self.ativo = False
         self.eh_lider = False
         try:
-            self._socket_servidor.close()   # para de escutar -> fica inacessível
-        except Exception:
+            if self._socket_servidor is not None:
+                self._socket_servidor.close()  # para de escutar -> fica inacessível
+        except OSError:
             pass
+        self._socket_servidor = None
         self.log(f"🔴 Nó {self.id} CAIU" + (" (era o líder!)" if era_lider else "") + ".",
                  tipo="falha")
 
@@ -102,24 +135,12 @@ class Node:
     # ------------------------------------------------------------------ #
 
     def _loop_servidor(self):
-        """Cria o socket de escuta e aceita conexões enquanto o nó estiver vivo."""
-        self._socket_servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # No Windows, SO_REUSEADDR permite DOUBLE-BIND (dois sockets na mesma porta),
-        # o que quebra a entrega de mensagens ao recriar o anel. SO_EXCLUSIVEADDRUSE
-        # garante o comportamento desejado: a porta é exclusiva deste socket.
-        # No Unix, SO_REUSEADDR já significa "reabrir a mesma porta após o close",
-        # que é o que queremos.
-        if sys.platform == "win32":
-            try:
-                self._socket_servidor.setsockopt(socket.SOL_SOCKET,
-                                                 socket.SO_EXCLUSIVEADDRUSE, 1)
-            except (AttributeError, OSError):
-                pass
-        else:
-            self._socket_servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket_servidor.bind((self.host, self.porta))
-        self._socket_servidor.listen()
+        """Aceita conexões enquanto o nó estiver vivo.
 
+        O socket de escuta já foi criado e bindado em iniciar(); aqui só fica o
+        laço de accept(). Quando derrubar() fecha o socket, o accept() levanta
+        OSError e encerramos o laço de forma limpa.
+        """
         while self.ativo:
             try:
                 conexao, _ = self._socket_servidor.accept()
@@ -131,6 +152,7 @@ class Node:
 
     def _tratar_conexao(self, conexao):
         """Lê UMA mensagem da conexão e decide o que fazer com base no 'tipo'."""
+        # PING e STATUS RESPONDEM nesta mesma conexão (precisam dela aberta).
         with conexao:
             mensagem = receber_mensagem(conexao)
             if mensagem is None:
@@ -140,23 +162,29 @@ class Node:
             if tipo == MSG_PING:
                 # Alguém está checando se estou vivo: respondo PONG.
                 conexao.sendall((self._json({"tipo": MSG_PONG, "id": self.id})).encode())
+                return
 
-            elif tipo == MSG_STATUS:
+            if tipo == MSG_STATUS:
                 # O client.py perguntou meu estado: devolvo um resumo.
                 conexao.sendall(self._json(self.snapshot()).encode())
+                return
 
-            elif tipo == MSG_INICIAR_ELEICAO:
-                # Um cliente externo pediu para EU começar uma eleição.
-                self.rede.eleicao_em_andamento = True
-                election.iniciar_eleicao(self)
+        # ELEICAO/COORDENADOR não respondem por esta conexão: o encaminhamento
+        # abre uma conexão NOVA para o sucessor. Por isso liberamos o socket de
+        # entrada ANTES de encaminhar (que é lento: tem passo_delay). Assim não
+        # seguramos a conexão do antecessor durante toda a propagação.
+        if tipo == MSG_INICIAR_ELEICAO:
+            # Um cliente externo pediu para EU começar uma eleição.
+            self.rede.eleicao_em_andamento = True
+            election.iniciar_eleicao(self)
 
-            elif tipo == MSG_ELECTION:
-                # Mensagem de eleição circulando: aplico a lógica do algoritmo.
-                election.processar_eleicao(self, mensagem)
+        elif tipo == MSG_ELECTION:
+            # Mensagem de eleição circulando: aplico a lógica do algoritmo.
+            election.processar_eleicao(self, mensagem)
 
-            elif tipo == MSG_COORDINATOR:
-                # Anúncio do novo líder circulando.
-                election.processar_coordenador(self, mensagem)
+        elif tipo == MSG_COORDINATOR:
+            # Anúncio do novo líder circulando.
+            election.processar_coordenador(self, mensagem)
 
     # ------------------------------------------------------------------ #
     # DETECÇÃO DE FALHA: o monitor que vigia o líder                      #

@@ -42,7 +42,8 @@ ao vivo na interface Streamlit. Ele traz:
 > em Python com **sockets reais** e uma **interface visual** para mostrar tudo
 > acontecendo em tempo real."
 
-**Apontar na tela:** o título da aplicação Streamlit já aberta.
+**Apontar na tela:** o título **"Eleição em Anel — Grupo 8"** na barra lateral da
+aplicação Streamlit já aberta.
 
 ---
 

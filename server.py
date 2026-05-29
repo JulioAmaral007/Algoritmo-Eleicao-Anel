@@ -22,10 +22,18 @@ os demais detectam a queda e iniciam uma nova eleição automaticamente.
 """
 
 import argparse
+import sys
 import threading
 import time
 
 from node import Node
+
+# No Windows o console usa cp1252 e quebra ao imprimir os emojis dos logs.
+# Forçamos UTF-8 na saída para o modo "um terminal por nó" funcionar lá também.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 
 class _RedeShim:
