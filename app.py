@@ -480,7 +480,7 @@ def _live():
         rows = []
         for l in reversed(logs[-80:]):
             cor    = kind_c.get(l.get("tipo", "info"), MUTED)
-            no_lbl = "sistema" if l["no"] == "sistema" else f"nó {l['no']}"
+            no_lbl = f"nó {l['no']}"
             rows.append(f"""
             <div style="background:{PANEL3};border:1px solid {BORDERS};
               border-left:3px solid {cor};border-radius:4px 9px 9px 4px;padding:7px 11px;">

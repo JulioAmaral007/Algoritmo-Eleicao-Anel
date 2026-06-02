@@ -28,7 +28,7 @@ import election
 from utils import (
     MSG_ELECTION, MSG_COORDINATOR, MSG_PING, MSG_PONG,
     MSG_STATUS, MSG_INICIAR_ELEICAO,
-    enviar_mensagem, receber_mensagem, agora,
+    enviar_mensagem, receber_mensagem, codificar, agora,
 )
 
 
@@ -161,12 +161,12 @@ class Node:
 
             if tipo == MSG_PING:
                 # Alguém está checando se estou vivo: respondo PONG.
-                conexao.sendall((self._json({"tipo": MSG_PONG, "id": self.id})).encode())
+                conexao.sendall(codificar({"tipo": MSG_PONG, "id": self.id}))
                 return
 
             if tipo == MSG_STATUS:
                 # O client.py perguntou meu estado: devolvo um resumo.
-                conexao.sendall(self._json(self.snapshot()).encode())
+                conexao.sendall(codificar(self.snapshot()))
                 return
 
         # ELEICAO/COORDENADOR não respondem por esta conexão: o encaminhamento
@@ -282,11 +282,6 @@ class Node:
             "eh_lider": self.eh_lider,
             "lider_conhecido": self.lider_conhecido,
         }
-
-    @staticmethod
-    def _json(dicionario):
-        import json
-        return json.dumps(dicionario) + "\n"
 
 
 class Rede:

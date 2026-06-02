@@ -42,7 +42,17 @@ MSG_INICIAR_ELEICAO = "INICIAR_ELEICAO"  # Pede a um nó que COMECE uma eleiçã
 
 def agora() -> str:
     """Retorna a hora atual formatada como HH:MM:SS.mmm (só para os logs)."""
-    return datetime.now().strftime("%H:%M:%S.") + f"{datetime.now().microsecond // 1000:03d}"
+    # %f dá microssegundos (6 dígitos); cortamos os 3 últimos para ficar em ms.
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+
+def codificar(mensagem: dict) -> bytes:
+    """Serializa a mensagem no formato da rede: JSON terminado em '\\n', em bytes.
+
+    Centraliza o "formato do fio" num só lugar, usado tanto por quem ENVIA
+    (enviar_mensagem) quanto por quem RESPONDE na mesma conexão (node.py).
+    """
+    return (json.dumps(mensagem) + "\n").encode("utf-8")
 
 
 def enviar_mensagem(host: str, porta: int, mensagem: dict,
@@ -68,9 +78,7 @@ def enviar_mensagem(host: str, porta: int, mensagem: dict,
             s.settimeout(timeout)          # não ficamos presos para sempre esperando
             s.connect((host, porta))       # <- aqui falha se o nó estiver morto
 
-            # Serializa o dicionário -> texto JSON -> bytes, terminando com '\n'.
-            dados = (json.dumps(mensagem) + "\n").encode("utf-8")
-            s.sendall(dados)               # ENVIO efetivo dos bytes pela rede
+            s.sendall(codificar(mensagem))  # serializa (JSON + '\n') e ENVIA os bytes
 
             if esperar_resposta:
                 resposta = _ler_linha(s)   # lê a resposta do outro lado
