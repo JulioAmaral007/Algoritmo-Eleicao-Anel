@@ -13,7 +13,6 @@ import threading
 import time
 
 import streamlit as st
-import streamlit.components.v1 as components
 import election
 from node import Rede
 
@@ -141,12 +140,30 @@ st.markdown(f"""
   }}
 
   iframe {{ border: none !important; display: block; }}
+
+  /* scrollbar fina da linha do tempo (renderizada inline, fora de iframe) */
+  .timeline-scroll::-webkit-scrollbar {{ width: 7px; }}
+  .timeline-scroll::-webkit-scrollbar-thumb {{ background: #233252; border-radius: 99px; }}
+  .timeline-scroll::-webkit-scrollbar-track {{ background: transparent; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ── session state ─────────────────────────────────────────────────────────────
 if "rede" not in st.session_state:
     st.session_state.rede = None
+
+
+@st.cache_resource
+def _faixa_portas():
+    """Contador da faixa de portas, compartilhado entre sessões e reloads.
+
+    Precisa sobreviver ao F5: o session_state zera no reload, mas os nós do
+    anel antigo (threads do MESMO processo do Streamlit) continuam vivos
+    segurando as portas. Se o contador voltasse ao início, todos os binds do
+    anel novo falhariam e ele nasceria morto. Com cache_resource, o contador
+    vive no processo do servidor e cada anel novo sempre pega faixa virgem.
+    """
+    return {"base": 6001}
 
 
 def _criar_rede(n: int, delay: float, auto: bool, embaralhar: bool):
@@ -156,8 +173,9 @@ def _criar_rede(n: int, delay: float, auto: bool, embaralhar: bool):
     # WinError 10048 ("endereço já em uso") ao reiniciar: em vez de tentar rebindar
     # as MESMAS portas (cujos sockets antigos ainda podem estar fechando no Windows),
     # simplesmente saltamos para portas livres. Não precisa de sleep nem de gambiarra.
-    base = st.session_state.get("porta_base", 6001)
-    st.session_state.porta_base = base + 100  # próxima criação salta de faixa
+    faixa = _faixa_portas()
+    base = faixa["base"]
+    faixa["base"] = base + 100  # próxima criação salta de faixa
     ids = list(range(1, n + 1))
     if embaralhar:
         random.shuffle(ids)
@@ -173,8 +191,11 @@ def _criar_rede(n: int, delay: float, auto: bool, embaralhar: bool):
 
 
 # ── SVG inline do anel ────────────────────────────────────────────────────────
-def _svg_anel(estados, transito, passo_delay: float) -> str:
-    """SVG inline (para st.markdown) — o diff do DOM preserva animateMotion entre rerenders."""
+def _svg_anel(estados, transitos) -> str:
+    """SVG inline (para st.markdown). A mensagem em trânsito é indicada pela
+    SETA DOURADA na aresta correspondente (sem bolinha animada). Quando o salto
+    pula um sucessor morto (nós não adjacentes), desenhamos uma seta dourada
+    tracejada cortando o anel — senão o salto ficaria invisível."""
     n = len(estados)
     if n == 0:
         return f'<div style="background:{PANEL2};border-radius:14px;height:380px;"></div>'
@@ -200,17 +221,10 @@ def _svg_anel(estados, transito, passo_delay: float) -> str:
               markerWidth="8" markerHeight="8" orient="auto-start-reverse">
         <path d="M0 0 L10 5 L0 10 z" fill="{GOLD}"/>
       </marker>
-      <radialGradient id="ballg" cx="38%" cy="32%" r="75%">
-        <stop offset="0%"   stop-color="#fff3d2"/>
-        <stop offset="45%"  stop-color="{GOLD2}"/>
-        <stop offset="100%" stop-color="{GOLD}"/>
-      </radialGradient>
     </defs>""")
 
-    # arestas
-    for i in range(n):
-        a = estados[i]["id"]
-        b = estados[(i + 1) % n]["id"]
+    def _linha(a, b, hot, tracejada=False):
+        """Linha de a->b com seta na ponta, encostando na borda dos círculos."""
         x1, y1 = pos[a];  x2, y2 = pos[b]
         dx, dy = x2 - x1, y2 - y1
         dist   = math.hypot(dx, dy) or 1
@@ -218,12 +232,28 @@ def _svg_anel(estados, transito, passo_delay: float) -> str:
         gap    = nr + 11
         sx, sy = x1 + ux * gap, y1 + uy * gap
         ex, ey = x2 - ux * gap, y2 - uy * gap
-        hot    = transito and transito.get("de") == a and transito.get("para") == b
         color  = GOLD if hot else EDGE
         width  = "3.2" if hot else "2"
         marker = "url(#arh)" if hot else "url(#ar)"
-        p.append(f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" '
-                 f'stroke="{color}" stroke-width="{width}" marker-end="{marker}"/>')
+        dash   = ' stroke-dasharray="7 6"' if tracejada else ""
+        return (f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" '
+                f'stroke="{color}" stroke-width="{width}" marker-end="{marker}"{dash}/>')
+
+    # arestas do anel (vizinhos imediatos)
+    adjacentes = set()
+    for i in range(n):
+        a = estados[i]["id"]
+        b = estados[(i + 1) % n]["id"]
+        adjacentes.add((a, b))
+        hot = any(t.get("de") == a and t.get("para") == b for t in transitos)
+        p.append(_linha(a, b, hot))
+
+    # saltos que PULAM nós mortos (de->para não adjacentes): seta tracejada
+    # cortando o anel, para o salto não ficar invisível.
+    for t in transitos:
+        de, para = t.get("de"), t.get("para")
+        if de in pos and para in pos and (de, para) not in adjacentes:
+            p.append(_linha(de, para, hot=True, tracejada=True))
 
     # nós
     for e in estados:
@@ -259,29 +289,6 @@ def _svg_anel(estados, transito, passo_delay: float) -> str:
             p.append(f'<text x="{x:.1f}" y="{y+17:.1f}" text-anchor="middle" '
                      f'font-size="11" font-weight="700" letter-spacing="0.5" '
                      f'fill="{sub_c}">{sub}</text>')
-
-    # bolinha com animateMotion (nativa SVG — funciona em inline sem iframe)
-    if transito and transito.get("de") in pos and transito.get("para") in pos:
-        de, para = transito["de"], transito["para"]
-        x1, y1   = pos[de];  x2, y2 = pos[para]
-        dur      = max(0.3, passo_delay * 0.9)
-        path     = f"M {x1:.1f},{y1:.1f} L {x2:.1f},{y2:.1f}"
-        tipo     = transito.get("tipo", "")
-        label    = "ELE" if tipo == "ELEICAO" else ("CRD" if tipo == "COORDENADOR" else tipo[:3])
-        p.append(f"""<g>
-          <circle r="16" fill="{GOLD2}" opacity="0.3">
-            <animateMotion dur="{dur:.2f}s" repeatCount="indefinite"><mpath href="#bpath"/></animateMotion>
-          </circle>
-          <circle r="12" fill="url(#ballg)" stroke="#fff7e6" stroke-width="1.5">
-            <animateMotion dur="{dur:.2f}s" repeatCount="indefinite"><mpath href="#bpath"/></animateMotion>
-          </circle>
-          <text text-anchor="middle" dominant-baseline="central" font-size="9"
-                font-weight="800" fill="#5a3d05" font-family="ui-monospace,monospace">
-            {label}
-            <animateMotion dur="{dur:.2f}s" repeatCount="indefinite"><mpath href="#bpath"/></animateMotion>
-          </text>
-        </g>
-        <defs><path id="bpath" d="{path}"/></defs>""")
 
     hint = (f'<text x="10" y="16" font-size="10" fill="{FAINT}" '
             f'font-family="ui-monospace,monospace">as setas mostram o sentido das mensagens</text>')
@@ -342,8 +349,8 @@ with st.sidebar:
         <span><b style="color:{TEXT};">Vermelho</b> = nó caído</span>
       </div>
       <div style="display:flex;align-items:center;gap:9px;font-size:12px;color:{MUTED};">
-        <span style="width:9px;height:9px;border-radius:50%;background:{GOLD2};flex:none;"></span>
-        <span>bolinha = <b style="color:{TEXT};">mensagem</b></span>
+        <span style="color:{GOLD};font-weight:900;flex:none;">→</span>
+        <span>seta dourada = <b style="color:{TEXT};">mensagem em trânsito</b></span>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -366,19 +373,22 @@ if rede is None:
 
 
 # ── fragmento ao vivo ─────────────────────────────────────────────────────────
-@st.fragment(run_every=0.4)
+# 0.25s de intervalo: menor que o passo_delay mínimo (0.2s da barra lateral),
+# para nenhum salto passar despercebido entre duas atualizações.
+@st.fragment(run_every=0.25)
 def _live():
     estados = rede.estados()
     with rede.lock:
-        transito = dict(rede.transito) if rede.transito else None
-        logs     = list(rede.logs)
+        transitos = [dict(t) for t in rede.transitos.values()]
+        logs      = list(rede.logs)
+    # Para o banner usamos o voo mais recente (pode haver mais de um no anel).
+    transito = max(transitos, key=lambda t: t.get("inicio", 0)) if transitos else None
 
     lider       = rede.lider_atual()
     em_curso    = rede.eleicao_em_andamento
     ativos      = [e for e in estados if e["ativo"]]
     mortos      = [e for e in estados if not e["ativo"]]
     qtd_ativos  = len(ativos)
-    passo_delay = next(iter(rede.nos.values())).passo_delay
 
     # colunas criadas dentro do fragmento
     col_ring, col_log = st.columns([1.9, 1.3])
@@ -386,21 +396,41 @@ def _live():
     # ── coluna central ─────────────────────────────────────────────────────────
     with col_ring:
         # banner de fase
+        # Entre um salto e outro o trânsito fica vazio por um instante; sem a
+        # "memória" abaixo, o banner alternava entre "Fase 1/2" e o texto
+        # genérico várias vezes por segundo (efeito de pisca-pisca).
         tp = transito.get("tipo") if transito else None
-        if em_curso and tp == "ELEICAO":
+        if em_curso:
+            if tp:
+                st.session_state.fase_atual = tp
+            else:
+                tp = st.session_state.get("fase_atual")
+        else:
+            st.session_state.fase_atual = None
+
+        if em_curso and tp == "ELEICAO" and transito:
             ids_str = str(transito.get("ids", []))
             b_main  = "Fase 1 — Eleição"
             b_sub   = (f"ELEICAO de nó {transito['de']} → nó {transito['para']}. "
                        f"Ids coletados: {ids_str}.")
             bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
-        elif em_curso and tp == "COORDENADOR":
+        elif em_curso and tp == "COORDENADOR" and transito:
             b_main  = "Fase 2 — Coordenador"
             b_sub   = (f"COORDENADOR de nó {transito['de']} → nó {transito['para']}, "
                        f"líder = nó {transito.get('lider')}.")
             bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
         elif em_curso:
-            b_main  = "Eleição em andamento"
-            b_sub   = "A mensagem circula pelo anel coletando ids — o maior vence."
+            # Sem mensagem em trânsito neste instante: mantém o título da fase
+            # lembrada (se houver) para o banner não "piscar" entre saltos.
+            if tp == "ELEICAO":
+                b_main = "Fase 1 — Eleição"
+                b_sub  = "A mensagem circula pelo anel coletando ids — o maior vence."
+            elif tp == "COORDENADOR":
+                b_main = "Fase 2 — Coordenador"
+                b_sub  = "O anúncio do novo líder está circulando pelo anel."
+            else:
+                b_main = "Eleição em andamento"
+                b_sub  = "A mensagem circula pelo anel coletando ids — o maior vence."
             bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
         elif lider:
             b_main  = f"Estável — líder: nó {lider}"
@@ -469,7 +499,7 @@ def _live():
         st.markdown("<div style='margin:4px 0;'></div>", unsafe_allow_html=True)
 
         # SVG inline do anel
-        st.markdown(_svg_anel(estados, transito, passo_delay), unsafe_allow_html=True)
+        st.markdown(_svg_anel(estados, transitos), unsafe_allow_html=True)
 
     # ── coluna direita: timeline ────────────────────────────────────────────────
     with col_log:
@@ -495,27 +525,30 @@ def _live():
         empty = (f'<div style="color:{FAINT};font-size:12px;text-align:center;padding:40px 10px;">'
                  f'Os eventos aparecerão aqui em tempo real.</div>')
 
-        components.html(f"""<!DOCTYPE html><html><body style="margin:0;padding:13px;
-          background:{PANEL};border:1px solid {BORDERS};border-radius:14px;overflow:hidden;">
-          <div style="display:flex;align-items:center;justify-content:space-between;
-                      margin-bottom:10px;">
-            <span style="font-size:10.5px;font-weight:700;text-transform:uppercase;
-                         letter-spacing:.08em;color:{MUTED};">Linha do tempo</span>
-            <span style="font-size:10px;color:{FAINT};font-family:ui-monospace,monospace;">
-              {len(logs)} eventos
-            </span>
-          </div>
-          <style>
-            ::-webkit-scrollbar{{width:7px}}
-            ::-webkit-scrollbar-thumb{{background:#233252;border-radius:99px}}
-            ::-webkit-scrollbar-track{{background:transparent}}
-            body{{font-family:system-ui,sans-serif}}
-          </style>
-          <div style="height:calc(100vh - 60px);overflow-y:auto;
-                      display:flex;flex-direction:column;gap:7px;">
-            {"".join(rows) if rows else empty}
-          </div>
-        </body></html>""", height=700, scrolling=False)
+        # HTML inline (st.markdown) em vez de components.html: o iframe era
+        # RECRIADO do zero a cada atualização do fragmento, o que causava um
+        # "flash" visível na coluna. Inline, o Streamlit atualiza o DOM por
+        # diff e a lista muda suavemente.
+        html = (
+            f'<div style="background:{PANEL};border:1px solid {BORDERS};'
+            f'border-radius:14px;padding:13px;">'
+            f'<div style="display:flex;align-items:center;'
+            f'justify-content:space-between;margin-bottom:10px;">'
+            f'<span style="font-size:10.5px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.08em;color:{MUTED};">Linha do tempo</span>'
+            f'<span style="font-size:10px;color:{FAINT};'
+            f'font-family:ui-monospace,monospace;">{len(logs)} eventos</span>'
+            f'</div>'
+            f'<div class="timeline-scroll" style="height:620px;overflow-y:auto;'
+            f'display:flex;flex-direction:column;gap:7px;">'
+            f'{"".join(rows) if rows else empty}'
+            f'</div></div>'
+        )
+        # CUIDADO: st.markdown interpreta Markdown. Linha em branco encerra o
+        # bloco HTML e linhas indentadas (4+ espaços) viram bloco de CÓDIGO —
+        # o HTML apareceria cru na tela. Por isso colapsamos tudo numa linha só.
+        st.markdown("".join(l.strip() for l in html.splitlines()),
+                    unsafe_allow_html=True)
 
 
 _live()

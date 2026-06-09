@@ -40,14 +40,14 @@ class _RedeShim:
     """
     Mini "Rede" para o modo de processo único.
 
-    A classe Node espera um objeto `rede` que ofereça: lock, logs, transito e
+    A classe Node espera um objeto `rede` que ofereça: lock, logs, transitos e
     eleicao_em_andamento. No modo Streamlit isso vem da classe Rede; aqui, como
     há só UM nó por processo, criamos esta versão mínima.
     """
     def __init__(self):
         self.lock = threading.Lock()
         self.logs = []
-        self.transito = None
+        self.transitos = {}
         self.eleicao_em_andamento = False
 
 

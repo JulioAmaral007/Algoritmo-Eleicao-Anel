@@ -250,20 +250,31 @@ class Node:
 
         Guarda também o conteúdo da mensagem (ids coletados ou líder anunciado)
         para que a interface possa mostrar — fica claro O QUE está sendo enviado.
+
+        Os trânsitos ficam num DICIONÁRIO indexado pelo nó remetente, não num
+        slot único: quando duas mensagens circulam ao mesmo tempo (ex.: dois
+        nós detectam a queda do líder e disparam eleições em paralelo), um slot
+        único fazia uma thread APAGAR o voo da outra — a bolinha/seta sumia do
+        anel no meio do salto. Com um trânsito por remetente, cada nó só mexe
+        no seu, e a interface desenha todos os voos simultâneos.
         """
         with self.rede.lock:
-            self.rede.transito = {
+            self.rede.transitos[self.id] = {
                 "de": de_id,
                 "para": para_id,
                 "tipo": mensagem.get("tipo"),
                 "ids": list(mensagem.get("ids", [])),
                 "lider": mensagem.get("lider"),
+                # Instante em que o "voo" começou. A interface usa isso para
+                # retomar a animação do ponto certo a cada atualização, em vez
+                # de reiniciá-la do zero (o que fazia a bolinha "teleportar").
+                "inicio": time.time(),
             }
 
     def limpar_transito(self):
-        """Apaga o registro de mensagem em trânsito."""
+        """Apaga o registro de mensagem em trânsito DESTE nó (só o dele)."""
         with self.rede.lock:
-            self.rede.transito = None
+            self.rede.transitos.pop(self.id, None)
 
     def log(self, texto, tipo="info"):
         """Adiciona uma linha à linha do tempo compartilhada (e ao terminal)."""
@@ -289,16 +300,17 @@ class Rede:
     Cria e gerencia um ANEL de nós.
 
     Guarda objetos compartilhados entre todos os nós:
-      - logs    : a linha do tempo única de eventos (para exibir na interface);
-      - transito: qual mensagem está viajando agora (para destacar na animação);
-      - lock    : trava para acessar logs/transito com segurança entre threads.
+      - logs     : a linha do tempo única de eventos (para exibir na interface);
+      - transitos: as mensagens viajando agora, uma por nó remetente
+                   (para destacar na animação — pode haver mais de uma);
+      - lock     : trava para acessar logs/transitos com segurança entre threads.
     """
 
     def __init__(self, ids, host="127.0.0.1", porta_base=5001, passo_delay=0.6):
         self.host = host
         self.lock = threading.Lock()
         self.logs = []                       # linha do tempo compartilhada
-        self.transito = None                 # mensagem viajando agora (ou None)
+        self.transitos = {}                  # {id do remetente: mensagem em voo}
         self.eleicao_em_andamento = False    # útil para a interface saber o estado
 
         # Monta o "mapa do anel": a ordem desta lista É a ordem do anel.
