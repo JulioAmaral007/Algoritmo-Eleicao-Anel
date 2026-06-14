@@ -117,6 +117,10 @@ class Node:
         era_lider = self.eh_lider
         self.ativo = False
         self.eh_lider = False
+        # Esquece também quem ERA o líder: um nó que cai e volta não pode
+        # confiar no estado antigo. Sem isso, um ex-líder revivido continuava
+        # com lider_conhecido == self.id e o monitor o ignorava para sempre.
+        self.lider_conhecido = None
         try:
             if self._socket_servidor is not None:
                 self._socket_servidor.close()  # para de escutar -> fica inacessível
@@ -140,10 +144,17 @@ class Node:
         O socket de escuta já foi criado e bindado em iniciar(); aqui só fica o
         laço de accept(). Quando derrubar() fecha o socket, o accept() levanta
         OSError e encerramos o laço de forma limpa.
+
+        Guardamos referências LOCAIS à thread e ao socket: se o nó for derrubado
+        e revivido muito rápido, iniciar() cria uma thread/socket NOVOS — a
+        thread antiga percebe que foi substituída e se encerra, em vez de ficar
+        duas threads aceitando conexões ao mesmo tempo.
         """
-        while self.ativo:
+        minha_thread = threading.current_thread()
+        meu_socket = self._socket_servidor
+        while self.ativo and self._thread_servidor is minha_thread:
             try:
-                conexao, _ = self._socket_servidor.accept()
+                conexao, _ = meu_socket.accept()
             except OSError:
                 break  # socket foi fechado em derrubar(): encerramos o loop.
             # Tratamos cada conexão em sua própria thread para não travar a fila.
@@ -154,20 +165,26 @@ class Node:
         """Lê UMA mensagem da conexão e decide o que fazer com base no 'tipo'."""
         # PING e STATUS RESPONDEM nesta mesma conexão (precisam dela aberta).
         with conexao:
+            # Timeout de leitura: se alguém conectar e não enviar nada, esta
+            # thread não fica presa para sempre esperando bytes que não vêm.
+            conexao.settimeout(2.0)
             mensagem = receber_mensagem(conexao)
             if mensagem is None:
                 return
             tipo = mensagem.get("tipo")
 
-            if tipo == MSG_PING:
-                # Alguém está checando se estou vivo: respondo PONG.
-                conexao.sendall(codificar({"tipo": MSG_PONG, "id": self.id}))
-                return
+            try:
+                if tipo == MSG_PING:
+                    # Alguém está checando se estou vivo: respondo PONG.
+                    conexao.sendall(codificar({"tipo": MSG_PONG, "id": self.id}))
+                    return
 
-            if tipo == MSG_STATUS:
-                # O client.py perguntou meu estado: devolvo um resumo.
-                conexao.sendall(codificar(self.snapshot()))
-                return
+                if tipo == MSG_STATUS:
+                    # O client.py perguntou meu estado: devolvo um resumo.
+                    conexao.sendall(codificar(self.snapshot()))
+                    return
+            except OSError:
+                return  # quem perguntou desistiu e fechou a conexão: tudo bem.
 
         # ELEICAO/COORDENADOR não respondem por esta conexão: o encaminhamento
         # abre uma conexão NOVA para o sucessor. Por isso liberamos o socket de
@@ -201,9 +218,14 @@ class Node:
         # detectem a falha e disparem eleições EXATAMENTE no mesmo instante.
         time.sleep(1.0 + 0.15 * self.id)
 
-        while self.ativo:
+        # Mesma proteção do _loop_servidor: se o nó cair e reviver enquanto
+        # esta thread dormia, uma NOVA thread de monitor foi criada — esta
+        # aqui percebe que foi substituída e se encerra (evita PINGs e
+        # eleições em duplicidade).
+        minha_thread = threading.current_thread()
+        while self.ativo and self._thread_monitor is minha_thread:
             time.sleep(1.5)
-            if not self.ativo:
+            if not self.ativo or self._thread_monitor is not minha_thread:
                 break
 
             lider = self.lider_conhecido
@@ -219,13 +241,23 @@ class Node:
             resposta = enviar_mensagem(endereco["host"], endereco["porta"],
                                        {"tipo": MSG_PING}, esperar_resposta=True)
             if resposta is None:
-                # Líder não respondeu -> caiu. Inicia nova eleição.
+                # Líder não respondeu -> caiu.
                 self.log(f"⚠️  Nó {self.id} detectou que o líder (nó {lider}) caiu!",
                          tipo="falha")
                 # Zera o líder conhecido para não disparar várias eleições seguidas.
                 self.lider_conhecido = None
-                self.rede.eleicao_em_andamento = True
-                election.iniciar_eleicao(self)
+                # Garante que só UM nó inicia a eleição: vários monitores podem
+                # detectar a falha quase ao mesmo tempo (dentro da janela de 1,5s),
+                # e cada um chamaria iniciar_eleicao em paralelo — causando múltiplas
+                # setas simultâneas no anel que pareciam "aleatórias". Com o lock,
+                # o check-and-set é atômico: só o primeiro que vê False sobe o flag
+                # e dispara a eleição; os demais veem True e ficam aguardando.
+                with self.rede.lock:
+                    ja_em_curso = self.rede.eleicao_em_andamento
+                    if not ja_em_curso:
+                        self.rede.eleicao_em_andamento = True
+                if not ja_em_curso:
+                    election.iniciar_eleicao(self)
 
     # ------------------------------------------------------------------ #
     # AUXILIARES usados pelo algoritmo (election.py) e pela interface     #
@@ -344,8 +376,11 @@ class Rede:
         self.nos[id_no].derrubar()
 
     def reviver(self, id_no):
-        """Religa um nó que havia caído."""
+        """Religa um nó que havia caído e reinicia a eleição para ressincronizar o anel."""
         self.nos[id_no].reviver()
+        no = self.nos[id_no]
+        if no.ativo:
+            self.iniciar_eleicao_em(id_no)
 
     def iniciar_eleicao_em(self, id_no):
         """Pede a um nó específico que comece uma eleição (acionado pela interface)."""
