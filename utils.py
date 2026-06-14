@@ -84,9 +84,10 @@ def enviar_mensagem(host: str, porta: int, mensagem: dict,
                 resposta = _ler_linha(s)   # lê a resposta do outro lado
                 return json.loads(resposta) if resposta else None
             return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (ConnectionRefusedError, socket.timeout, OSError, ValueError):
         # Qualquer um desses erros significa, na prática: "não consegui falar
         # com esse nó". Para o nosso algoritmo, isso quer dizer "nó indisponível".
+        # (ValueError cobre o caso raro de uma resposta que não é JSON válido.)
         return None
 
 
@@ -96,11 +97,18 @@ def receber_mensagem(conexao: socket.socket):
 
     O socket do nó que está escutando recebe uma conexão; chamamos esta função
     para extrair o dicionário que o remetente enviou.
+
+    Retorna None se a mensagem não chegou inteira ou não é JSON válido — quem
+    chama trata None como "não veio nada útil" e segue em frente. Sem essa
+    proteção, um byte estranho na rede derrubaria a thread que atende a conexão.
     """
-    linha = _ler_linha(conexao)
-    if not linha:
+    try:
+        linha = _ler_linha(conexao)
+        if not linha:
+            return None
+        return json.loads(linha)
+    except (OSError, ValueError):
         return None
-    return json.loads(linha)
 
 
 def _ler_linha(conexao: socket.socket) -> str:

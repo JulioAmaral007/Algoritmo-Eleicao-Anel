@@ -198,9 +198,9 @@ O "despacho" das mensagens recebidas é o coração do lado servidor:
 ```python
 # node.py — decide o que fazer com base no tipo da mensagem recebida
 if tipo == MSG_PING:
-    conexao.sendall(self._json({"tipo": MSG_PONG, "id": self.id}).encode())
+    conexao.sendall(codificar({"tipo": MSG_PONG, "id": self.id}))
 elif tipo == MSG_STATUS:
-    conexao.sendall(self._json(self.snapshot()).encode())
+    conexao.sendall(codificar(self.snapshot()))
 elif tipo == MSG_INICIAR_ELEICAO:
     election.iniciar_eleicao(self)
 elif tipo == MSG_ELECTION:
@@ -222,13 +222,12 @@ def enviar_mensagem(host, porta, mensagem, timeout=1.0, esperar_resposta=False):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect((host, porta))          # falha aqui se o nó estiver morto
-            dados = (json.dumps(mensagem) + "\n").encode("utf-8")
-            s.sendall(dados)                  # ENVIO dos bytes pela rede
+            s.sendall(codificar(mensagem))    # serializa (JSON + '\n') e ENVIA
             if esperar_resposta:
                 resposta = _ler_linha(s)
                 return json.loads(resposta) if resposta else None
             return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
+    except (ConnectionRefusedError, socket.timeout, OSError, ValueError):
         return None                           # "não consegui falar com o nó"
 ```
 
@@ -237,8 +236,11 @@ def enviar_mensagem(host, porta, mensagem, timeout=1.0, esperar_resposta=False):
 ```python
 # utils.py
 def receber_mensagem(conexao):
-    linha = _ler_linha(conexao)               # lê bytes até encontrar '\n'
-    return json.loads(linha) if linha else None
+    try:
+        linha = _ler_linha(conexao)           # lê bytes até encontrar '\n'
+        return json.loads(linha) if linha else None
+    except (OSError, ValueError):
+        return None                           # mensagem incompleta/inválida
 ```
 
 ### 7.3 Definição dos números (ids) dos processos
@@ -410,9 +412,10 @@ python3 client.py --porta 5002 --comando status
 
 ![Novo líder eleito](img/03_novo_lider.png)
 
-> Na interface ao vivo, o líder aparece com a coroa 👑, os nós ativos em azul,
-> os caídos em vermelho tracejado, e uma **bolinha** percorre a aresta por onde
-> a mensagem está viajando. A **linha do tempo** ao lado mostra cada evento.
+> Na interface ao vivo, o líder aparece em dourado, os nós ativos em azul,
+> os caídos em vermelho tracejado, e uma **seta dourada** destaca a aresta por
+> onde a mensagem está viajando (tracejada quando o salto pula um nó morto).
+> A **linha do tempo** ao lado mostra cada evento.
 
 ---
 

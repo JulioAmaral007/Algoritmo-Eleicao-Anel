@@ -19,11 +19,19 @@ Exemplos:
 """
 
 import argparse
+import sys
 
 from utils import (
     MSG_INICIAR_ELEICAO, MSG_STATUS, MSG_PING,
     enviar_mensagem,
 )
+
+# No Windows o console usa cp1252 e quebra ao imprimir os emojis (✅/❌).
+# Forçamos UTF-8 na saída, como já fazem server.py e teste_eleicao.py.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
 
 
 def main():

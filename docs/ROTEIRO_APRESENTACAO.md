@@ -115,7 +115,7 @@ Frase-chave para o professor:
 > "Acabei de criar 5 nós, do id 1 ao 5. Como pedi a eleição inicial, eles já estão
 > elegendo um líder agora. Reparem nas mensagens de **ELEIÇÃO** circulando…"
 
-**Apontar:** a bolinha animada percorrendo as arestas do anel e os **logs** descendo.
+**Apontar:** a seta dourada destacando a aresta por onde a mensagem passa e os **logs** descendo.
 
 > "...e pronto: o nó **5**, que tem o maior id, foi eleito **líder** — está destacado
 > em dourado com a coroa 👑."
