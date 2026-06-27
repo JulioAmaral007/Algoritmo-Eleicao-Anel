@@ -10,9 +10,10 @@ Cada NÓ é, ao mesmo tempo:
 
 Cada NÓ roda em DUAS threads de fundo:
   - thread do servidor    -> aceita conexões e trata cada mensagem que chega;
-  - thread do monitor     -> de tempos em tempos verifica se o líder está vivo
-                             (detecção de falha) e, se não estiver, inicia uma
-                             nova eleição automaticamente.
+  - thread do monitor     -> de tempos em tempos verifica se o SEU SUCESSOR está
+                             vivo (detecção de falha). Se o sucessor cair, o anel
+                             se reconfigura; e, se quem caiu era o líder, dispara
+                             automaticamente uma nova eleição.
 
 A classe REDE existe só para facilitar: ela cria N nós em portas sequenciais,
 guarda um log compartilhado (linha do tempo única) e o "estado de trânsito"
@@ -35,13 +36,19 @@ from utils import (
 class Node:
     """Um processo participante do anel de eleição."""
 
-    def __init__(self, id, host, porta, anel, rede, passo_delay=0.6, imprimir=False):
+    def __init__(self, id, host, porta, rede, passo_delay=0.6, imprimir=False):
         # --- Identidade e topologia ---
         self.id = id                  # identificador único (inteiro). MAIOR id vence.
         self.host = host              # endereço (localhost na demo)
         self.porta = porta            # porta TCP onde este nó escuta
-        self.anel = anel              # lista [{id, host, porta}, ...] em ordem de anel
-        self.rede = rede              # referência à Rede (log e trânsito compartilhados)
+        # MODELO PURO DO ANEL: o nó conhece APENAS o seu sucessor (o próximo nó
+        # vivo). Ele NÃO guarda a lista de todos os nós do anel. Quando precisa
+        # saber quem é o próximo — ao subir, ao encaminhar uma mensagem ou ao
+        # detectar que o sucessor caiu — ele PERGUNTA ao serviço de topologia/
+        # membership (self.rede), que devolve só o sucessor. A cada instante o
+        # estado do nó guarda um único vizinho conhecido: self.sucessor.
+        self.sucessor = None          # {id, host, porta} do próximo nó vivo (ou None)
+        self.rede = rede              # serviço de topologia + log/trânsito compartilhados
 
         # --- Estado do algoritmo ---
         self.eh_lider = False             # este nó é o líder atual?
@@ -101,6 +108,9 @@ class Node:
         self._thread_servidor.start()
         self._thread_monitor = threading.Thread(target=self._loop_monitor, daemon=True)
         self._thread_monitor.start()
+        # Pergunto ao serviço de topologia quem é o meu sucessor (próximo nó vivo).
+        # É a ÚNICA informação de topologia que este nó guarda.
+        self.sucessor, _ = self.rede.proximo_vivo(self.id)
         self.log(f"🟢 Nó {self.id} entrou no anel (escutando na porta {self.porta}).",
                  tipo="sistema")
 
@@ -121,6 +131,9 @@ class Node:
         # confiar no estado antigo. Sem isso, um ex-líder revivido continuava
         # com lider_conhecido == self.id e o monitor o ignorava para sempre.
         self.lider_conhecido = None
+        # Esquece também o sucessor: ao reviver, o nó vai perguntar de novo ao
+        # serviço de topologia quem é o próximo nó vivo (pode ter mudado).
+        self.sucessor = None
         try:
             if self._socket_servidor is not None:
                 self._socket_servidor.close()  # para de escutar -> fica inacessível
@@ -209,13 +222,23 @@ class Node:
 
     def _loop_monitor(self):
         """
-        De tempos em tempos, verifica se o líder ainda responde.
+        De tempos em tempos, verifica se o SUCESSOR ainda responde.
 
-        Se o líder NÃO responder (caiu), este nó inicia automaticamente uma
-        nova eleição. É o que garante a "recuperação" do sistema após falhas.
+        MODELO PURO: como o nó só conhece o seu sucessor, é só ELE que o nó
+        consegue vigiar (não dá para "pingar o líder" diretamente — o nó nem
+        sabe o endereço dele). Em um anel, todo nó tem exatamente um antecessor;
+        logo, a queda de qualquer nó é percebida por EXATAMENTE UM vizinho: o seu
+        antecessor. Em particular, a queda do líder é detectada pelo antecessor
+        do líder, que então dispara a nova eleição.
+
+        Regras ao detectar que o sucessor caiu:
+          - sempre CONSERTA o anel: pede ao serviço de topologia o próximo nó
+            vivo (pulando o que caiu) e adota-o como novo sucessor;
+          - só INICIA uma eleição se o nó que caiu era o líder conhecido. Se um
+            nó comum cai, o anel apenas se reconstrói (sem nova eleição).
         """
-        # Um pequeno atraso inicial diferente por nó (id) evita que todos os nós
-        # detectem a falha e disparem eleições EXATAMENTE no mesmo instante.
+        # Um pequeno atraso inicial diferente por nó (id) evita disparos
+        # simultâneos quando vários eventos acontecem ao mesmo tempo.
         time.sleep(1.0 + 0.15 * self.id)
 
         # Mesma proteção do _loop_servidor: se o nó cair e reviver enquanto
@@ -228,54 +251,63 @@ class Node:
             if not self.ativo or self._thread_monitor is not minha_thread:
                 break
 
-            lider = self.lider_conhecido
-            # Nada a fazer se: não há líder definido, ou EU sou o líder.
-            if lider is None or lider == self.id:
+            sucessor = self.sucessor
+            # Sem sucessor conhecido (talvez eu seja o único vivo): tento
+            # descobrir um. Se ainda não houver, não há o que vigiar.
+            if sucessor is None or sucessor["id"] == self.id:
+                self.sucessor, _ = self.rede.proximo_vivo(self.id)
                 continue
 
-            endereco = self._endereco_de(lider)
-            if endereco is None:
-                continue
-
-            # PING no líder, esperando um PONG de volta.
-            resposta = enviar_mensagem(endereco["host"], endereco["porta"],
+            # PING no MEU sucessor, esperando um PONG de volta.
+            resposta = enviar_mensagem(sucessor["host"], sucessor["porta"],
                                        {"tipo": MSG_PING}, esperar_resposta=True)
-            if resposta is None:
-                # Líder não respondeu -> caiu.
-                self.log(f"⚠️  Nó {self.id} detectou que o líder (nó {lider}) caiu!",
+            if resposta is not None:
+                # Sucessor vivo. Aproveito para "estabilizar" o anel: se algum nó
+                # mais próximo voltou a viver (reentrou entre mim e o meu sucessor
+                # atual), adoto-o como sucessor. Isso reencaixa nós revividos.
+                ideal, _ = self.rede.proximo_vivo(self.id)
+                if ideal is not None and ideal["id"] != sucessor["id"]:
+                    self.sucessor = ideal
+                continue
+
+            # Sucessor não respondeu -> caiu.
+            morto = sucessor["id"]
+            # Conserta o anel: novo sucessor = próximo nó vivo, pulando o que caiu.
+            # 'pulados' traz todos os nós mortos saltados nesse conserto — útil
+            # para descobrir se o LÍDER estava entre eles (ex.: líder e antecessor
+            # do líder caíram quase juntos; quem detecta é o nó anterior a ambos).
+            novo_sucessor, pulados = self.rede.proximo_vivo(self.id, ignorar={morto})
+            self.sucessor = novo_sucessor
+
+            lider_caiu = (self.lider_conhecido is not None
+                          and (self.lider_conhecido == morto
+                               or self.lider_conhecido in pulados))
+
+            if not lider_caiu:
+                # Caiu um nó comum: o anel só se reconstrói, sem nova eleição.
+                self.log(f"🔧 Nó {self.id} percebeu que seu sucessor (nó {morto}) caiu; "
+                         f"anel reconfigurado (novo sucessor: "
+                         f"{novo_sucessor['id'] if novo_sucessor else 'nenhum'}).",
                          tipo="falha")
-                # Zera o líder conhecido para não disparar várias eleições seguidas.
-                self.lider_conhecido = None
-                # Garante que só UM nó inicia a eleição: vários monitores podem
-                # detectar a falha quase ao mesmo tempo (dentro da janela de 1,5s),
-                # e cada um chamaria iniciar_eleicao em paralelo — causando múltiplas
-                # setas simultâneas no anel que pareciam "aleatórias". Com o lock,
-                # o check-and-set é atômico: só o primeiro que vê False sobe o flag
-                # e dispara a eleição; os demais veem True e ficam aguardando.
-                with self.rede.lock:
-                    ja_em_curso = self.rede.eleicao_em_andamento
-                    if not ja_em_curso:
-                        self.rede.eleicao_em_andamento = True
+                continue
+
+            self.log(f"⚠️  Nó {self.id} detectou que o líder (nó {self.lider_conhecido}) caiu!",
+                     tipo="falha")
+            # Zera o líder conhecido para não disparar várias eleições seguidas.
+            self.lider_conhecido = None
+            # Garante que só UMA eleição comece, mesmo que outra ação concorrente
+            # (ex.: eleição manual pela interface) aconteça ao mesmo tempo: o
+            # check-and-set do flag é atômico sob o lock.
+            with self.rede.lock:
+                ja_em_curso = self.rede.eleicao_em_andamento
                 if not ja_em_curso:
-                    election.iniciar_eleicao(self)
+                    self.rede.eleicao_em_andamento = True
+            if not ja_em_curso:
+                election.iniciar_eleicao(self)
 
     # ------------------------------------------------------------------ #
     # AUXILIARES usados pelo algoritmo (election.py) e pela interface     #
     # ------------------------------------------------------------------ #
-
-    def indice_no_anel(self):
-        """Devolve a posição (índice) deste nó dentro da lista do anel."""
-        for i, n in enumerate(self.anel):
-            if n["id"] == self.id:
-                return i
-        return -1
-
-    def _endereco_de(self, id_no):
-        """Procura, no anel, o endereço (host/porta) de um nó pelo id."""
-        for n in self.anel:
-            if n["id"] == id_no:
-                return n
-        return None
 
     def marcar_transito(self, de_id, para_id, mensagem):
         """Registra que uma mensagem está viajando de->para (para a animação).
@@ -324,14 +356,23 @@ class Node:
             "ativo": self.ativo,
             "eh_lider": self.eh_lider,
             "lider_conhecido": self.lider_conhecido,
+            # Único vizinho que o nó conhece (modelo puro): o seu sucessor.
+            "sucessor": self.sucessor["id"] if self.sucessor else None,
         }
 
 
 class Rede:
     """
-    Cria e gerencia um ANEL de nós.
+    Cria e gerencia um ANEL de nós, e atua como SERVIÇO DE TOPOLOGIA/MEMBERSHIP.
+
+    No modelo puro, cada Node conhece apenas o seu sucessor. Quem conhece a
+    ordem do anel inteiro e quem está vivo é ESTA classe — uma camada de
+    membership separada do algoritmo de eleição. Os nós perguntam a ela "quem é
+    o meu próximo nó vivo?" (proximo_vivo) e guardam só essa resposta.
 
     Guarda objetos compartilhados entre todos os nós:
+      - anel     : a ordem do anel (lista [{id, host, porta}, ...]) — o "mapa"
+                   de membership; os nós NÃO têm cópia dele;
       - logs     : a linha do tempo única de eventos (para exibir na interface);
       - transitos: as mensagens viajando agora, uma por nó remetente
                    (para destacar na animação — pode haver mais de uma);
@@ -352,19 +393,86 @@ class Rede:
             for i, id in enumerate(ids)
         ]
 
-        # Cria os nós (ainda desligados).
+        # Cria os nós (ainda desligados). Repare: NÃO passamos o anel ao nó —
+        # ele recebe só uma referência a esta Rede (serviço de topologia) e vai
+        # perguntar a ela quem é o seu sucessor quando precisar.
         self.nos = {
-            n["id"]: Node(n["id"], host, n["porta"], self.anel, self,
+            n["id"]: Node(n["id"], host, n["porta"], self,
                           passo_delay=passo_delay)
             for n in self.anel
         }
 
+    # --- Serviço de TOPOLOGIA: responde "quem é o próximo nó vivo?" ---
+
+    def proximo_vivo(self, id_atual, ignorar=()):
+        """
+        Devolve o PRÓXIMO nó VIVO depois de `id_atual` na ordem do anel.
+
+        É a única forma de um nó descobrir o seu sucessor: ele não conhece o
+        anel, então pergunta aqui. Nós mortos (e os listados em `ignorar`) são
+        pulados.
+
+        Retorna uma tupla (sucessor, pulados):
+          - sucessor: {id, host, porta} do próximo nó vivo, ou None se `id_atual`
+                      for o único vivo do anel;
+          - pulados : lista dos ids saltados (mortos/ignorados) até achar o vivo.
+                      Serve para o monitor saber se o LÍDER estava entre os que
+                      caíram (detecção de queda do líder em falhas múltiplas).
+        """
+        total = len(self.anel)
+        # Posição de id_atual na ordem do anel.
+        idx = next((i for i, n in enumerate(self.anel) if n["id"] == id_atual), None)
+        if idx is None:
+            return None, []
+
+        pulados = []
+        for salto in range(1, total):
+            candidato = self.anel[(idx + salto) % total]
+            cid = candidato["id"]
+            if cid == id_atual:
+                break
+            no = self.nos[cid]
+            if no.ativo and cid not in ignorar:
+                return candidato, pulados
+            pulados.append(cid)
+        return None, pulados
+
+    def maior_vivo(self, ids):
+        """
+        Maior id, dentre `ids`, cujo nó ainda está VIVO (ou None se nenhum).
+
+        Usado para fechar a eleição sem eleger um nó que entrou na lista de
+        candidatos mas caiu durante a circulação: filtramos pelos que ainda
+        respondem (aqui, pelo flag `ativo` que esta camada conhece) e só então
+        aplicamos a regra do maior id.
+        """
+        vivos = [i for i in ids if i in self.nos and self.nos[i].ativo]
+        return max(vivos) if vivos else None
+
+    def _reconfigurar_sucessores(self):
+        """
+        Recalcula o sucessor de cada nó VIVO.
+
+        Chamado quando alguém ENTRA no anel (iniciar/reviver), para reencaixar o
+        recém-chegado e atualizar quem aponta para ele. NÃO é chamado em
+        derrubar(): ali deixamos o antecessor do nó que caiu manter o ponteiro
+        antigo de propósito, para que o MONITOR dele perceba a queda via PING
+        (é assim que a falha é detectada de verdade).
+        """
+        for n in self.anel:
+            no = self.nos[n["id"]]
+            if no.ativo:
+                no.sucessor, _ = self.proximo_vivo(no.id)
+
     # --- Operações de alto nível usadas pela interface Streamlit ---
 
     def iniciar_todos(self):
-        """Liga todos os nós do anel."""
+        """Liga todos os nós do anel e encaixa cada um com o seu sucessor."""
         for no in self.nos.values():
             no.iniciar()
+        # Ao subir um por um, os primeiros não tinham sucessor ainda (eram os
+        # únicos vivos). Agora que todos estão de pé, fechamos o anel.
+        self._reconfigurar_sucessores()
 
     def parar_todos(self):
         """Desliga todos os nós (encerra a demonstração)."""
@@ -380,6 +488,9 @@ class Rede:
         self.nos[id_no].reviver()
         no = self.nos[id_no]
         if no.ativo:
+            # O nó voltou: reencaixa-o no anel (atualiza o sucessor de quem
+            # agora deve apontar para ele) antes de ressincronizar a eleição.
+            self._reconfigurar_sucessores()
             self.iniciar_eleicao_em(id_no)
 
     def iniciar_eleicao_em(self, id_no):

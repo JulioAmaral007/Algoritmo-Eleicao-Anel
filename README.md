@@ -29,7 +29,7 @@ Não há banco de dados, autenticação ou dependências externas além do Strea
 ## 🎯 Principais Funcionalidades
 
 - **Eleição de líder em duas voltas**: mensagem `ELEIÇÃO` circula coletando os IDs dos nós vivos; o maior ID vence. Em seguida, mensagem `COORDENADOR` circula avisando todos do resultado.
-- **Detecção automática de falha**: cada nó monitora o líder com PING/PONG a cada 1,5 s. Se o líder não responder, uma nova eleição é disparada automaticamente.
+- **Detecção automática de falha**: cada nó monitora o **seu sucessor** com PING/PONG a cada 1,5 s (modelo puro — só conhece o próximo nó). Se o sucessor cair, o anel se reconfigura; se o nó que caiu era o líder, uma nova eleição é disparada automaticamente.
 - **Tolerância a falhas parciais**: ao enviar uma mensagem, o nó pula sucessores mortos e continua pelo próximo vivo — o algoritmo funciona mesmo com vários nós caídos simultaneamente.
 - **Interface visual animada**: anel SVG que destaca a seta dourada na aresta por onde a mensagem está passando; seta tracejada quando há um salto sobre nó morto.
 - **Linha do tempo em tempo real**: painel lateral com todos os eventos (eleição, coordenador, falha, sistema) coloridos por tipo.
@@ -52,11 +52,11 @@ utils.py  ──►  election.py  ──►  node.py  ──►  app.py
 
 **Algoritmo puro (`election.py`):** sem código de rede ou de interface. Recebe um objeto `no` e executa as três funções do protocolo: `iniciar_eleicao`, `processar_eleicao` e `processar_coordenador`.
 
-**Nó e rede (`node.py`):** a classe `Node` é ao mesmo tempo servidor (thread que aceita conexões) e monitor (thread que faz PING no líder). A classe `Rede` cria e gerencia N nós, mantendo o log compartilhado e o dicionário de mensagens em trânsito (`transitos`) usado pela interface.
+**Nó e rede (`node.py`):** a classe `Node` é ao mesmo tempo servidor (thread que aceita conexões) e monitor (thread que faz PING no **seu sucessor** — modelo puro: o nó só conhece o próximo nó vivo). A classe `Rede` cria e gerencia N nós e atua como **serviço de topologia/membership** (responde `proximo_vivo`), mantendo o log compartilhado e o dicionário de mensagens em trânsito (`transitos`) usado pela interface.
 
 **Interface visual (`app.py`):** Streamlit com `@st.fragment(run_every=0.25s)` atualizando o SVG do anel e a linha do tempo. O SVG é renderizado inline (não em iframe) para atualização por diff do DOM, sem flashes.
 
-**Modo distribuído (`server.py` / `client.py`):** `server.py` instancia um único `Node` por processo usando `_RedeShim` (substituto mínimo de `Rede`). `client.py` envia comandos por socket TCP.
+**Modo distribuído (`server.py` / `client.py`):** `server.py` instancia um único `Node` por processo usando `_TopologiaProcesso` (serviço de topologia mínimo que descobre o sucessor vivo por PING, já que processos separados não compartilham memória). `client.py` envia comandos por socket TCP.
 
 ---
 
@@ -146,8 +146,8 @@ Cada mensagem é um dicionário Python serializado como JSON, terminado em `\n`,
 |---|---|---|
 | `ELEICAO` | nó → sucessor | Coleta IDs dos nós vivos (lista cresce a cada salto) |
 | `COORDENADOR` | nó → sucessor | Anuncia o novo líder após a volta completa |
-| `PING` | monitor → líder | Verifica se o líder está vivo |
-| `PONG` | líder → monitor | Confirma que está vivo |
+| `PING` | monitor → sucessor | Verifica se o sucessor está vivo |
+| `PONG` | sucessor → monitor | Confirma que está vivo |
 | `STATUS` | client → nó | Solicita snapshot do estado do nó |
 | `INICIAR_ELEICAO` | client → nó | Pede ao nó que dispare uma eleição |
 

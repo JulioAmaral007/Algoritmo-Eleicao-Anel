@@ -75,10 +75,17 @@ def processar_eleicao(no, mensagem):
 
     # CASO (A): a volta se completou (a mensagem voltou para alguém já listado).
     if no.id in ids_coletados:
-        novo_lider = max(ids_coletados)   # <-- a regra: vence o MAIOR id
+        # A regra é "vence o MAIOR id", mas só entre os que AINDA estão vivos.
+        # Sem esse filtro, um nó que entrou na lista e caiu DURANTE a eleição
+        # podia ser "eleito morto" — e o anel ficava preso, pois o sucessor de
+        # todos passa a pular o líder morto e ninguém o monitora. Confirmamos a
+        # vivacidade com a camada de topologia antes de coroar.
+        novo_lider = no.rede.maior_vivo(ids_coletados)
+        if novo_lider is None:
+            novo_lider = no.id   # defensivo: ao menos este nó (que fecha) está vivo
         no.log(
-            f"🔁 Eleição deu a volta completa. Candidatos vivos: {ids_coletados}. "
-            f"Maior id = {novo_lider} → novo líder!",
+            f"🔁 Eleição deu a volta completa. Candidatos: {ids_coletados}. "
+            f"Maior id vivo = {novo_lider} → novo líder!",
             tipo="eleicao",
         )
         # Começamos a VOLTA 2: anunciar o coordenador a todos.
@@ -146,40 +153,45 @@ def _aplicar_lider(no, lider_id):
 
 def _enviar_para_sucessor_vivo(no, mensagem):
     """
-    Envia a mensagem para o PRÓXIMO nó VIVO do anel.
+    Envia a mensagem para o SUCESSOR do nó (o próximo nó vivo do anel).
 
-    Esta é a parte que dá robustez ao algoritmo: se o sucessor imediato estiver
-    morto (a conexão falha), nós PULAMOS para o próximo, e assim por diante.
-    Dessa forma a mensagem continua circulando mesmo com nós caídos.
+    MODELO PURO: o nó não conhece o anel inteiro. Ele pergunta ao serviço de
+    topologia quem é o seu próximo nó vivo e envia SÓ para ele — um salto de
+    cada vez. Se esse sucessor cair bem na hora do envio (a conexão falha),
+    pedimos o PRÓXIMO vivo (ignorando o que falhou) e tentamos de novo. Assim a
+    mensagem continua circulando mesmo com nós caindo durante a eleição.
 
     Retorna True se conseguiu entregar a alguém; False se ninguém mais respondeu
     (nesse caso, o nó está sozinho e se declara líder).
     """
-    total = len(no.anel)
-    indice = no.indice_no_anel()
+    ignorar = set()
 
-    # Percorre o anel a partir do vizinho seguinte, dando no máximo uma volta.
-    for salto in range(1, total):
-        alvo = no.anel[(indice + salto) % total]
-        if alvo["id"] == no.id:
-            continue  # nunca enviamos para nós mesmos
+    while True:
+        # Pergunta ao serviço de topologia quem é o próximo nó vivo (pulando os
+        # que já falharam nesta tentativa). É a única informação de topologia
+        # que o nó usa: o seu sucessor.
+        sucessor, _ = no.rede.proximo_vivo(no.id, ignorar=ignorar)
+        if sucessor is None:
+            # Ninguém mais respondeu: o nó está sozinho e se declara líder.
+            no.log(f"🏝️  Nó {no.id} é o único vivo. Declara-se líder.", tipo="coordenador")
+            _aplicar_lider(no, no.id)
+            no.rede.eleicao_em_andamento = False
+            return False
+
+        # Passa a conhecer este sucessor (é o vizinho que o nó guarda).
+        no.sucessor = sucessor
 
         # Marca o "trânsito" da mensagem para a animação na interface...
-        no.marcar_transito(no.id, alvo["id"], mensagem)
+        no.marcar_transito(no.id, sucessor["id"], mensagem)
         time.sleep(no.passo_delay)   # ...e dá um tempinho para o olho humano ver.
 
-        entregue = enviar_mensagem(alvo["host"], alvo["porta"], mensagem)
+        entregue = enviar_mensagem(sucessor["host"], sucessor["porta"], mensagem)
         no.limpar_transito()
 
         if entregue is not None:
-            return True  # entregamos ao primeiro sucessor vivo: missão cumprida.
+            return True  # entregamos ao sucessor vivo: missão cumprida.
 
-        # Sucessor não respondeu: provavelmente está morto. Tentamos o próximo.
-        no.log(f"➡️  Sucessor (nó {alvo['id']}) não respondeu; pulando para o próximo.",
+        # Sucessor caiu bem na hora: ignora-o e pede o próximo vivo.
+        no.log(f"➡️  Sucessor (nó {sucessor['id']}) não respondeu; pulando para o próximo.",
                tipo="falha")
-
-    # Se chegamos aqui, ninguém mais no anel respondeu: o nó está sozinho.
-    no.log(f"🏝️  Nó {no.id} é o único vivo. Declara-se líder.", tipo="coordenador")
-    _aplicar_lider(no, no.id)
-    no.rede.eleicao_em_andamento = False
-    return False
+        ignorar.add(sucessor["id"])

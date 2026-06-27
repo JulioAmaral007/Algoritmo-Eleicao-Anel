@@ -31,12 +31,9 @@ BLUE2   = "#6aa6ff"
 BLUEBG  = "rgba(63,140,255,.14)"
 GOLD    = "#f3b73c"
 GOLD2   = "#ffd57a"
-GOLDBG  = "rgba(243,183,60,.14)"
 GREEN   = "#34d399"
-GREENBG = "rgba(52,211,153,.12)"
 RED     = "#f0563f"
 RED2    = "#ff7a66"
-REDBG   = "rgba(240,86,63,.14)"
 EDGE    = "#2e3e60"
 
 # ── página ────────────────────────────────────────────────────────────────────
@@ -300,6 +297,93 @@ def _svg_anel(estados, transitos) -> str:
             f'border-radius:14px;overflow:hidden;">{svg}</div>')
 
 
+# ── banner de fase e linha do tempo (helpers de renderização) ──────────────────
+def _banner_fase(em_curso, tp, transito, lider, qtd_ativos):
+    """Título, subtítulo e cores do banner de fase.
+
+    Função PURA (não toca em session_state): recebe o estado já resolvido e
+    devolve a tupla (titulo, subtitulo, cor_borda, cor_fundo, cor_texto).
+    """
+    GOLD_BG = "rgba(243,183,60,.07)"
+    if em_curso and tp == "ELEICAO" and transito:
+        return ("Fase 1 — Eleição",
+                f"ELEICAO de nó {transito['de']} → nó {transito['para']}. "
+                f"Ids coletados: {transito.get('ids', [])}.",
+                GOLD, GOLD_BG, GOLD2)
+    if em_curso and tp == "COORDENADOR" and transito:
+        return ("Fase 2 — Coordenador",
+                f"COORDENADOR de nó {transito['de']} → nó {transito['para']}, "
+                f"líder = nó {transito.get('lider')}.",
+                GOLD, GOLD_BG, GOLD2)
+    if em_curso and tp == "ELEICAO":
+        return ("Fase 1 — Eleição",
+                "A mensagem circula pelo anel coletando ids — o maior vence.",
+                GOLD, GOLD_BG, GOLD2)
+    if em_curso and tp == "COORDENADOR":
+        return ("Fase 2 — Coordenador",
+                "O anúncio do novo líder está circulando pelo anel.",
+                GOLD, GOLD_BG, GOLD2)
+    if em_curso:
+        return ("Eleição em andamento",
+                "A mensagem circula pelo anel coletando ids — o maior vence.",
+                GOLD, GOLD_BG, GOLD2)
+    if lider:
+        return (f"Estável — líder: nó {lider}",
+                f"Todos os {qtd_ativos} nós reconhecem o nó {lider}. "
+                f"Derrube o líder para forçar nova eleição.",
+                GREEN, "rgba(52,211,153,.07)", GREEN)
+    return ("Anel pronto",
+            "Inicie uma eleição manualmente ou use a eleição automática.",
+            BLUE, "rgba(63,140,255,.07)", BLUE2)
+
+
+def _timeline_html(logs) -> str:
+    """Monta o HTML (inline) da linha do tempo a partir dos logs."""
+    kind_c = {
+        "eleicao": GOLD, "coordenador": BLUE,
+        "falha": RED, "sistema": MUTED, "info": MUTED,
+    }
+    rows = []
+    for ev in reversed(logs[-80:]):
+        cor = kind_c.get(ev.get("tipo", "info"), MUTED)
+        rows.append(f"""
+        <div style="background:{PANEL3};border:1px solid {BORDERS};
+          border-left:3px solid {cor};border-radius:4px 9px 9px 4px;padding:7px 11px;">
+          <div style="font-size:9.5px;color:{FAINT};margin-bottom:2px;
+                      font-family:ui-monospace,monospace;">
+            [{ev['hora']}] · <span style="color:{BLUE2};">nó {ev['no']}</span>
+          </div>
+          <div style="font-size:11px;color:#cdd7ea;line-height:1.45;
+                      font-family:ui-monospace,monospace;">{ev['texto']}</div>
+        </div>""")
+
+    empty = (f'<div style="color:{FAINT};font-size:12px;text-align:center;padding:40px 10px;">'
+             f'Os eventos aparecerão aqui em tempo real.</div>')
+
+    # HTML inline (st.markdown) em vez de components.html: o iframe era recriado
+    # do zero a cada atualização do fragmento (flash visível na coluna). Inline,
+    # o Streamlit atualiza o DOM por diff e a lista muda suavemente.
+    html = (
+        f'<div style="background:{PANEL};border:1px solid {BORDERS};'
+        f'border-radius:14px;padding:13px;">'
+        f'<div style="display:flex;align-items:center;'
+        f'justify-content:space-between;margin-bottom:10px;">'
+        f'<span style="font-size:10.5px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:.08em;color:{MUTED};">Linha do tempo</span>'
+        f'<span style="font-size:10px;color:{FAINT};'
+        f'font-family:ui-monospace,monospace;">{len(logs)} eventos</span>'
+        f'</div>'
+        f'<div class="timeline-scroll" style="height:620px;overflow-y:auto;'
+        f'display:flex;flex-direction:column;gap:7px;">'
+        f'{"".join(rows) if rows else empty}'
+        f'</div></div>'
+    )
+    # CUIDADO: st.markdown interpreta Markdown. Linha em branco encerra o bloco
+    # HTML e linhas indentadas (4+ espaços) viram bloco de código — por isso
+    # colapsamos tudo numa linha só.
+    return "".join(line.strip() for line in html.splitlines())
+
+
 # ── sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown(f"""
@@ -408,39 +492,8 @@ def _live():
         else:
             st.session_state.fase_atual = None
 
-        if em_curso and tp == "ELEICAO" and transito:
-            ids_str = str(transito.get("ids", []))
-            b_main  = "Fase 1 — Eleição"
-            b_sub   = (f"ELEICAO de nó {transito['de']} → nó {transito['para']}. "
-                       f"Ids coletados: {ids_str}.")
-            bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
-        elif em_curso and tp == "COORDENADOR" and transito:
-            b_main  = "Fase 2 — Coordenador"
-            b_sub   = (f"COORDENADOR de nó {transito['de']} → nó {transito['para']}, "
-                       f"líder = nó {transito.get('lider')}.")
-            bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
-        elif em_curso:
-            # Sem mensagem em trânsito neste instante: mantém o título da fase
-            # lembrada (se houver) para o banner não "piscar" entre saltos.
-            if tp == "ELEICAO":
-                b_main = "Fase 1 — Eleição"
-                b_sub  = "A mensagem circula pelo anel coletando ids — o maior vence."
-            elif tp == "COORDENADOR":
-                b_main = "Fase 2 — Coordenador"
-                b_sub  = "O anúncio do novo líder está circulando pelo anel."
-            else:
-                b_main = "Eleição em andamento"
-                b_sub  = "A mensagem circula pelo anel coletando ids — o maior vence."
-            bb_bdr, bb_bg, bb_mc = GOLD, "rgba(243,183,60,.07)", GOLD2
-        elif lider:
-            b_main  = f"Estável — líder: nó {lider}"
-            b_sub   = (f"Todos os {qtd_ativos} nós reconhecem o nó {lider}. "
-                       f"Derrube o líder para forçar nova eleição.")
-            bb_bdr, bb_bg, bb_mc = GREEN, "rgba(52,211,153,.07)", GREEN
-        else:
-            b_main  = "Anel pronto"
-            b_sub   = "Inicie uma eleição manualmente ou use a eleição automática."
-            bb_bdr, bb_bg, bb_mc = BLUE, "rgba(63,140,255,.07)", BLUE2
+        b_main, b_sub, bb_bdr, bb_bg, bb_mc = _banner_fase(
+            em_curso, tp, transito, lider, qtd_ativos)
 
         st.markdown(f"""
         <div style="background:{bb_bg};border-left:3px solid {bb_bdr};
@@ -460,11 +513,12 @@ def _live():
                 st.markdown(f'<div style="font-size:11.5px;font-weight:700;color:{BLUE2};">'
                             f'Iniciar eleição</div>', unsafe_allow_html=True)
                 if ids_ativos:
-                    ini = st.selectbox("_ini", ids_ativos,
-                                       format_func=lambda x: f"Nó {x}",
-                                       key="sel_ini", label_visibility="collapsed")
+                    # Sem escolher o iniciador: a eleição em anel não depende de um
+                    # nó específico — qualquer nó vivo pode começar. Sorteamos um
+                    # ao acaso para deixar isso claro na demonstração.
+                    st.caption("A partir de um nó qualquer do anel.")
                     if st.button("Iniciar", use_container_width=True, key="btn_ini"):
-                        rede.iniciar_eleicao_em(ini)
+                        rede.iniciar_eleicao_em(random.choice(ids_ativos))
                 else:
                     st.caption("Nenhum nó ativo.")
 
@@ -503,52 +557,7 @@ def _live():
 
     # ── coluna direita: timeline ────────────────────────────────────────────────
     with col_log:
-        kind_c = {
-            "eleicao": GOLD, "coordenador": BLUE,
-            "falha": RED, "sistema": MUTED, "info": MUTED,
-        }
-        rows = []
-        for l in reversed(logs[-80:]):
-            cor    = kind_c.get(l.get("tipo", "info"), MUTED)
-            no_lbl = f"nó {l['no']}"
-            rows.append(f"""
-            <div style="background:{PANEL3};border:1px solid {BORDERS};
-              border-left:3px solid {cor};border-radius:4px 9px 9px 4px;padding:7px 11px;">
-              <div style="font-size:9.5px;color:{FAINT};margin-bottom:2px;
-                          font-family:ui-monospace,monospace;">
-                [{l['hora']}] · <span style="color:{BLUE2};">{no_lbl}</span>
-              </div>
-              <div style="font-size:11px;color:#cdd7ea;line-height:1.45;
-                          font-family:ui-monospace,monospace;">{l['texto']}</div>
-            </div>""")
-
-        empty = (f'<div style="color:{FAINT};font-size:12px;text-align:center;padding:40px 10px;">'
-                 f'Os eventos aparecerão aqui em tempo real.</div>')
-
-        # HTML inline (st.markdown) em vez de components.html: o iframe era
-        # RECRIADO do zero a cada atualização do fragmento, o que causava um
-        # "flash" visível na coluna. Inline, o Streamlit atualiza o DOM por
-        # diff e a lista muda suavemente.
-        html = (
-            f'<div style="background:{PANEL};border:1px solid {BORDERS};'
-            f'border-radius:14px;padding:13px;">'
-            f'<div style="display:flex;align-items:center;'
-            f'justify-content:space-between;margin-bottom:10px;">'
-            f'<span style="font-size:10.5px;font-weight:700;text-transform:uppercase;'
-            f'letter-spacing:.08em;color:{MUTED};">Linha do tempo</span>'
-            f'<span style="font-size:10px;color:{FAINT};'
-            f'font-family:ui-monospace,monospace;">{len(logs)} eventos</span>'
-            f'</div>'
-            f'<div class="timeline-scroll" style="height:620px;overflow-y:auto;'
-            f'display:flex;flex-direction:column;gap:7px;">'
-            f'{"".join(rows) if rows else empty}'
-            f'</div></div>'
-        )
-        # CUIDADO: st.markdown interpreta Markdown. Linha em branco encerra o
-        # bloco HTML e linhas indentadas (4+ espaços) viram bloco de CÓDIGO —
-        # o HTML apareceria cru na tela. Por isso colapsamos tudo numa linha só.
-        st.markdown("".join(l.strip() for l in html.splitlines()),
-                    unsafe_allow_html=True)
+        st.markdown(_timeline_html(logs), unsafe_allow_html=True)
 
 
 _live()

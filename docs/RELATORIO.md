@@ -107,11 +107,13 @@ flowchart TD
 - **`app.py` / `server.py` / `client.py`** são as três formas de **usar** o
   núcleo: a interface visual, um processo por nó e um cliente de comandos.
 
-O **anel** é representado por uma lista ordenada de endereços, **igual em todos
-os nós**. A posição na lista define quem é o sucessor de quem:
+O **anel** é representado por uma lista ordenada de endereços que vive **apenas
+na camada de membership** (`Rede`), não em cada nó. A posição na lista define
+quem é o sucessor de quem; cada nó pergunta `proximo_vivo(meu_id)` e guarda só o
+seu sucessor (modelo puro):
 
 ```python
-# node.py — o "mapa do anel": a ordem desta lista É a ordem do anel.
+# node.py — classe Rede: o "mapa do anel" (membership), que os nós NÃO copiam.
 self.anel = [
     {"id": id, "host": host, "porta": porta_base + i}
     for i, id in enumerate(ids)
@@ -143,8 +145,8 @@ Todas as mensagens são **dicionários em JSON**, identificados por um campo
 |---|---|---|---|
 | `ELEICAO` | nó → sucessor | `ids` (lista), `iniciador` | coleta os ids dos nós vivos (Volta 1) |
 | `COORDENADOR` | nó → sucessor | `lider`, `iniciador`, `visitados` | anuncia o líder eleito (Volta 2) |
-| `PING` | monitor → líder | — | "você está vivo?" (detecção de falha) |
-| `PONG` | líder → monitor | `id` | resposta: "estou vivo!" |
+| `PING` | monitor → sucessor | — | "você está vivo?" (detecção de falha) |
+| `PONG` | sucessor → monitor | `id` | resposta: "estou vivo!" |
 | `STATUS` | client.py → nó | — | consulta o estado do nó |
 | `INICIAR_ELEICAO` | client.py → nó | — | pede ao nó que comece uma eleição |
 
@@ -190,8 +192,8 @@ Com o socket já pronto, o nó sobe **duas threads de fundo**:
 1. **Thread do servidor** (`_loop_servidor`): apenas fica em `accept()` e, para
    cada conexão recebida, trata a mensagem conforme o `tipo`.
 2. **Thread do monitor** (`_loop_monitor`): de tempos em tempos envia um `PING`
-   ao líder; se não vier `PONG`, conclui que o líder caiu e **inicia uma nova
-   eleição**.
+   ao **seu sucessor** (o único nó que conhece); se não vier `PONG`, conserta o
+   anel e, **se o nó que caiu era o líder**, inicia uma nova eleição.
 
 O "despacho" das mensagens recebidas é o coração do lado servidor:
 
@@ -246,13 +248,18 @@ def receber_mensagem(conexao):
 ### 7.3 Definição dos números (ids) dos processos
 
 ```python
-# node.py — cada nó guarda seu id, e o anel conhece todos os ids/endereços
+# node.py — MODELO PURO: cada nó conhece APENAS o seu sucessor
 class Node:
-    def __init__(self, id, host, porta, anel, rede, ...):
+    def __init__(self, id, host, porta, rede, ...):
         self.id = id                # identificador único; MAIOR id vence
         self.porta = porta          # porta TCP onde este nó escuta
-        self.anel = anel            # lista [{id, host, porta}, ...]
+        self.sucessor = None        # {id, host, porta} do próximo nó vivo (único vizinho conhecido)
+        self.rede = rede            # serviço de topologia: responde "quem é o meu sucessor?"
 ```
+
+> O nó **não** guarda a lista de todos os nós. Quem conhece a ordem do anel e
+> quem está vivo é a classe `Rede` (camada de *membership*), separada do
+> algoritmo. O nó pergunta a ela `proximo_vivo(meu_id)` e guarda só a resposta.
 
 ### 7.4 Núcleo do algoritmo — processar uma mensagem de ELEIÇÃO
 
@@ -261,7 +268,7 @@ class Node:
 def processar_eleicao(no, mensagem):
     ids = mensagem["ids"]
     if no.id in ids:                          # a mensagem deu a volta completa
-        novo_lider = max(ids)                 # regra: vence o MAIOR id
+        novo_lider = no.rede.maior_vivo(ids)  # vence o MAIOR id ainda VIVO
         anuncio = {"tipo": MSG_COORDINATOR, "lider": novo_lider,
                    "iniciador": no.id, "visitados": [no.id]}
         _aplicar_lider(no, novo_lider)
@@ -271,52 +278,69 @@ def processar_eleicao(no, mensagem):
         _enviar_para_sucessor_vivo(no, mensagem)  # repasso adiante
 ```
 
-### 7.5 Repasse que pula nós mortos (robustez do anel)
+### 7.5 Repasse para o sucessor (um salto de cada vez)
 
 ```python
-# election.py
+# election.py — o nó pergunta ao serviço de topologia quem é o próximo nó vivo
 def _enviar_para_sucessor_vivo(no, mensagem):
-    total = len(no.anel)
-    indice = no.indice_no_anel()
-    for salto in range(1, total):             # tenta sucessor, depois o seguinte...
-        alvo = no.anel[(indice + salto) % total]
-        if alvo["id"] == no.id:
-            continue
-        entregue = enviar_mensagem(alvo["host"], alvo["porta"], mensagem)
+    ignorar = set()
+    while True:
+        sucessor, _ = no.rede.proximo_vivo(no.id, ignorar=ignorar)
+        if sucessor is None:                  # ninguém mais vivo → sou o líder
+            _aplicar_lider(no, no.id)
+            return False
+        no.sucessor = sucessor                # passa a conhecer este sucessor
+        entregue = enviar_mensagem(sucessor["host"], sucessor["porta"], mensagem)
         if entregue is not None:
-            return True                       # entregue ao 1º sucessor vivo
-        # sucessor morto → tenta o próximo
-    _aplicar_lider(no, no.id)                 # ninguém mais vivo → sou o líder
-    return False
+            return True                       # entregue ao sucessor vivo
+        ignorar.add(sucessor["id"])           # caiu na hora → pede o próximo vivo
 ```
+
+O nó nunca varre o anel: ele só envia para o **sucessor** que o serviço de
+topologia (`Rede.proximo_vivo`) indica. Quem "pula" os nós mortos é a camada de
+*membership* — o algoritmo continua sendo um salto por vez.
 
 ---
 
 ## 8. Detecção de falha e recuperação
 
-A detecção de falha é **passiva e simples**: cada nó (que não é o líder) envia
-periodicamente um `PING` ao líder. Como cada mensagem abre uma conexão TCP nova,
-um líder **morto recusa a conexão** — e é exatamente assim que a falha é
-percebida.
+A detecção de falha respeita o **modelo puro**: como cada nó só conhece o seu
+sucessor, é só ELE que o nó consegue vigiar (não dá para "pingar o líder"
+diretamente — o nó nem sabe o endereço dele). Cada nó manda periodicamente um
+`PING` ao **seu sucessor**. Como cada mensagem abre uma conexão TCP nova, um nó
+**morto recusa a conexão** — e é assim que a falha é percebida.
+
+Em um anel, todo nó tem exatamente um antecessor; logo, a queda de qualquer nó é
+detectada por **exatamente um** vizinho: o seu antecessor. Em particular, a
+queda do **líder** é detectada pelo antecessor do líder, que então dispara a
+nova eleição (isso, de quebra, já evita a "tempestade de eleições", pois só um
+nó reage).
 
 ```python
 # node.py — dentro do _loop_monitor
-resposta = enviar_mensagem(end["host"], end["porta"], {"tipo": MSG_PING},
-                           esperar_resposta=True)
-if resposta is None:                          # líder não respondeu → caiu
-    self.lider_conhecido = None               # evita disparos repetidos
-    election.iniciar_eleicao(self)            # inicia nova eleição
+resposta = enviar_mensagem(sucessor["host"], sucessor["porta"],
+                           {"tipo": MSG_PING}, esperar_resposta=True)
+if resposta is None:                          # sucessor não respondeu → caiu
+    # 1) sempre CONSERTA o anel: novo sucessor = próximo nó vivo (pula o morto)
+    novo, pulados = self.rede.proximo_vivo(self.id, ignorar={morto})
+    self.sucessor = novo
+    # 2) só RE-ELEGE se o nó que caiu era o líder conhecido
+    if self.lider_conhecido in ({morto} | set(pulados)):
+        self.lider_conhecido = None           # evita disparos repetidos
+        election.iniciar_eleicao(self)         # inicia nova eleição
 ```
 
-**Como evitamos conflitos / tempestade de eleições:**
+**Decisões de projeto:**
 
-- cada monitor começa com um **atraso inicial diferente** (proporcional ao id),
-  para que nem todos detectem a falha no mesmo instante;
-- se **mais de uma** eleição acontecer ao mesmo tempo, **não há problema**:
-  ambas coletam os mesmos ids e elegem o **mesmo** maior id — o resultado
-  converge;
+- **Queda de um nó comum** apenas reconfigura o anel (conserta o ponteiro do
+  sucessor), **sem** nova eleição;
+- a checagem `lider_conhecido in {morto} ∪ pulados` também cobre o caso de o
+  **líder e o seu antecessor caírem quase juntos**: quem detecta é o nó anterior
+  a ambos, e o líder aparece na lista de `pulados` saltados no conserto;
 - a Volta 2 (`COORDENADOR`) tem uma lista `visitados` que **impede laços
-  infinitos** caso o iniciador caia no meio do anúncio.
+  infinitos** caso o iniciador caia no meio do anúncio;
+- um lock garante que, mesmo com uma eleição manual concorrente, **só uma**
+  eleição comece.
 
 **Recuperação:** quando o nó que caiu volta (`reviver()`), ele reentra no anel.
 Se o seu id for o maior, basta uma nova eleição (manual ou disparada por outra
@@ -427,8 +451,9 @@ Validamos o comportamento com três cenários (todos passaram):
 o nó 1 inicia; a lista coletada é `[1, 2, 3, 4]`; vence o **nó 4**.
 
 **Cenário B — falha do líder:**
-derrubamos o nó 4; os monitores detectam (PING sem PONG); nova eleição automática
-elege o **nó 3** (maior id entre os vivos `[1, 2, 3]`).
+derrubamos o nó 4; o **antecessor do líder** (nó 3) detecta a queda (PING sem
+PONG ao seu sucessor); nova eleição automática elege o **nó 3** (maior id entre
+os vivos `[1, 2, 3]`).
 
 **Cenário C — recuperação:**
 o nó 4 volta; uma nova eleição o reconduz à liderança (**nó 4**).
