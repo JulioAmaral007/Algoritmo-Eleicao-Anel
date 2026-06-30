@@ -82,8 +82,6 @@ responsabilidade** e seja fácil de explicar:
 flowchart TD
     subgraph Interface
       APP["app.py<br/>(Streamlit: anel, botões, logs)"]
-      CLI["client.py<br/>(cliente de terminal)"]
-      SRV["server.py<br/>(roda 1 nó como processo)"]
     end
     subgraph Núcleo
       NODE["node.py<br/>Node (servidor + monitor) e Rede"]
@@ -91,8 +89,6 @@ flowchart TD
       UTIL["utils.py<br/>envio/recebimento por socket"]
     end
     APP --> NODE
-    CLI -->|socket TCP| NODE
-    SRV --> NODE
     NODE --> ELEC
     ELEC --> UTIL
     NODE --> UTIL
@@ -104,8 +100,8 @@ flowchart TD
   de rede ou de interface.
 - **`node.py`** define o **nó** (que roda um servidor de socket e um monitor de
   falhas em threads) e a **Rede** (que cria e gerencia vários nós).
-- **`app.py` / `server.py` / `client.py`** são as três formas de **usar** o
-  núcleo: a interface visual, um processo por nó e um cliente de comandos.
+- **`app.py`** é a interface visual (Streamlit) que cria o anel, dispara as
+  ações (criar, derrubar, reviver) e anima as mensagens em tempo real.
 
 O **anel** é representado por uma lista ordenada de endereços que vive **apenas
 na camada de membership** (`Rede`), não em cada nó. A posição na lista define
@@ -132,9 +128,9 @@ Cada **nó é, ao mesmo tempo, cliente e servidor**:
 
 ### Identificação dos processos
 
-Cada processo recebe um **id inteiro único** e uma **porta TCP** própria. No
-modo visual, os ids vão de `1` a `N`; no modo multiprocesso, são passados por
-linha de comando (`--id` e `--anel`). O id é o critério de eleição (maior vence).
+Cada nó recebe um **id inteiro único** e uma **porta TCP** própria. Os ids vão
+de `1` a `N` e cada nó escuta em uma porta a partir de uma base. O id é o
+critério de eleição (maior vence).
 
 ### Tipos de requisição (mensagens) enviadas e recebidas
 
@@ -147,8 +143,6 @@ Todas as mensagens são **dicionários em JSON**, identificados por um campo
 | `COORDENADOR` | nó → sucessor | `lider`, `iniciador`, `visitados` | anuncia o líder eleito (Volta 2) |
 | `PING` | monitor → sucessor | — | "você está vivo?" (detecção de falha) |
 | `PONG` | sucessor → monitor | `id` | resposta: "estou vivo!" |
-| `STATUS` | client.py → nó | — | consulta o estado do nó |
-| `INICIAR_ELEICAO` | client.py → nó | — | pede ao nó que comece uma eleição |
 
 ---
 
@@ -406,19 +400,6 @@ streamlit run app.py
 Na barra lateral, ajuste a **quantidade de nós** e o **atraso por salto** (quanto
 maior, mais devagar a mensagem viaja — ótimo para explicar). Clique em
 **Criar anel / Reiniciar**.
-
-### Execução — multiprocesso (sockets reais entre processos)
-
-```bash
-# um terminal por nó
-python3 server.py --id 1 --anel 1:5001,2:5002,3:5003
-python3 server.py --id 2 --anel 1:5001,2:5002,3:5003
-python3 server.py --id 3 --anel 1:5001,2:5002,3:5003
-
-# em outro terminal: comandos via cliente
-python3 client.py --porta 5001 --comando eleicao
-python3 client.py --porta 5002 --comando status
-```
 
 ---
 

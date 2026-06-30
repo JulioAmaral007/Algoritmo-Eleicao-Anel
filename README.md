@@ -33,8 +33,6 @@ Não há banco de dados, autenticação ou dependências externas além do Strea
 - **Tolerância a falhas parciais**: ao enviar uma mensagem, o nó pula sucessores mortos e continua pelo próximo vivo — o algoritmo funciona mesmo com vários nós caídos simultaneamente.
 - **Interface visual animada**: anel SVG que destaca a seta dourada na aresta por onde a mensagem está passando; seta tracejada quando há um salto sobre nó morto.
 - **Linha do tempo em tempo real**: painel lateral com todos os eventos (eleição, coordenador, falha, sistema) coloridos por tipo.
-- **Modo multi-processo real**: cada nó pode rodar como um processo independente em terminais separados, comunicando-se de verdade pela rede local.
-- **Cliente de linha de comando**: envia comandos (`eleicao`, `status`, `ping`) a qualquer nó por socket.
 - **Teste automatizado**: script que cobre os três cenários — eleição inicial, falha do líder e reeleição após retorno do nó.
 
 ---
@@ -45,7 +43,6 @@ O projeto é organizado em camadas, cada uma com uma responsabilidade clara:
 
 ```
 utils.py  ──►  election.py  ──►  node.py  ──►  app.py
-                                           ──►  server.py / client.py
 ```
 
 **Protocolo de rede (`utils.py`):** toda comunicação usa JSON terminado em `\n` sobre TCP. Uma conexão = uma mensagem. Retorno `None` de `enviar_mensagem()` é o mecanismo de detecção de falha — conexão recusada significa nó morto.
@@ -55,8 +52,6 @@ utils.py  ──►  election.py  ──►  node.py  ──►  app.py
 **Nó e rede (`node.py`):** a classe `Node` é ao mesmo tempo servidor (thread que aceita conexões) e monitor (thread que faz PING no **seu sucessor** — modelo puro: o nó só conhece o próximo nó vivo). A classe `Rede` cria e gerencia N nós e atua como **serviço de topologia/membership** (responde `proximo_vivo`), mantendo o log compartilhado e o dicionário de mensagens em trânsito (`transitos`) usado pela interface.
 
 **Interface visual (`app.py`):** Streamlit com `@st.fragment(run_every=0.25s)` atualizando o SVG do anel e a linha do tempo. O SVG é renderizado inline (não em iframe) para atualização por diff do DOM, sem flashes.
-
-**Modo distribuído (`server.py` / `client.py`):** `server.py` instancia um único `Node` por processo usando `_TopologiaProcesso` (serviço de topologia mínimo que descobre o sucessor vivo por PING, já que processos separados não compartilham memória). `client.py` envia comandos por socket TCP.
 
 ---
 
@@ -68,8 +63,6 @@ algoritmo/
 ├── election.py           # Algoritmo de eleição (lógica pura, sem I/O)
 ├── node.py               # Classe Node (servidor + monitor) e Rede (gerenciador)
 ├── app.py                # Interface visual Streamlit
-├── server.py             # Executa um nó como processo independente
-├── client.py             # Cliente de linha de comando
 ├── teste_eleicao.py      # Teste automatizado dos 3 cenários
 ├── requirements.txt      # Dependência: streamlit>=1.37
 └── docs/
@@ -95,7 +88,7 @@ cd algoritmo
 pip install -r requirements.txt
 ```
 
-### Opção 1 — Interface visual (recomendada)
+### Interface visual
 
 ```bash
 streamlit run app.py
@@ -106,27 +99,7 @@ Abre no navegador automaticamente. Na barra lateral:
 1. Ajuste a quantidade de nós e o atraso por salto.
 2. Clique em **Criar anel / Reiniciar** — a eleição inicial acontece automaticamente.
 3. Use **Derrubar um nó** no líder para simular falha e observe a nova eleição.
-4. Use **Reviver um nó** e **Iniciar eleição** para explorar outros cenários.
-
-### Opção 2 — Processos distribuídos reais
-
-Abra um terminal por nó:
-
-```bash
-python server.py --id 1 --anel 1:5001,2:5002,3:5003
-python server.py --id 2 --anel 1:5001,2:5002,3:5003
-python server.py --id 3 --anel 1:5001,2:5002,3:5003
-```
-
-Em outro terminal, comande os nós:
-
-```bash
-python client.py --porta 5001 --comando eleicao   # inicia eleição
-python client.py --porta 5002 --comando status    # consulta estado
-python client.py --porta 5003 --comando ping      # verifica se está vivo
-```
-
-Pressione **Ctrl+C** no terminal do líder para simular sua queda — os demais detectam e elegem novo líder automaticamente.
+4. Use **Reviver um nó** para reintegrar um nó caído — o retorno dispara uma nova eleição automaticamente.
 
 ### Teste automatizado
 
@@ -148,8 +121,6 @@ Cada mensagem é um dicionário Python serializado como JSON, terminado em `\n`,
 | `COORDENADOR` | nó → sucessor | Anuncia o novo líder após a volta completa |
 | `PING` | monitor → sucessor | Verifica se o sucessor está vivo |
 | `PONG` | sucessor → monitor | Confirma que está vivo |
-| `STATUS` | client → nó | Solicita snapshot do estado do nó |
-| `INICIAR_ELEICAO` | client → nó | Pede ao nó que dispare uma eleição |
 
 ---
 
