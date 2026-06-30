@@ -48,7 +48,6 @@ st.markdown(f"""
   [data-testid="stAppViewContainer"], .stApp {{ background: {BG} !important; }}
   section.main {{ background: {BG}; }}
 
-  /* sidebar — sempre visível, largura fixa, não pode ser fechada */
   [data-testid="stSidebar"] {{
     background: {PANEL} !important;
     border-right: 1px solid {BORDERS} !important;
@@ -61,7 +60,6 @@ st.markdown(f"""
   }}
   [data-testid="stSidebar"] > div {{ padding-top: 1rem; }}
 
-  /* esconde chrome do Streamlit: header (barra preta), menus e botões de toggle da sidebar */
   header,
   #MainMenu, footer,
   [data-testid="stDecoration"],
@@ -69,19 +67,16 @@ st.markdown(f"""
   [data-testid="stToolbar"],
   [data-testid="collapsedControl"] {{ display: none !important; }}
 
-  /* padding do bloco principal */
   .block-container {{
     padding: 1.2rem 1.5rem 0 !important;
     max-width: 100% !important;
   }}
 
-  /* sliders */
   [data-testid="stSlider"] label {{
     color: {MUTED} !important;
     font-size: 12.5px !important;
   }}
 
-  /* selects */
   [data-baseweb="select"] > div:first-child {{
     background: {PANEL3} !important;
     border-color: {BORDER} !important;
@@ -97,7 +92,6 @@ st.markdown(f"""
   li[role="option"] {{ color: {TEXT} !important; font-size: 13px !important; }}
   li[role="option"]:hover {{ background: {BLUEBG} !important; }}
 
-  /* botões */
   .stButton > button {{
     border-radius: 10px !important;
     font-weight: 700 !important;
@@ -123,13 +117,11 @@ st.markdown(f"""
     background: {BLUEBG} !important;
   }}
 
-  /* checkboxes */
   [data-testid="stCheckbox"] label {{
     color: {TEXT} !important;
     font-size: 13px !important;
   }}
 
-  /* container com borda */
   [data-testid="stVerticalBlockBorderWrapper"] {{
     background: {PANEL} !important;
     border: 1px solid {BORDERS} !important;
@@ -138,7 +130,6 @@ st.markdown(f"""
 
   iframe {{ border: none !important; display: block; }}
 
-  /* scrollbar fina da linha do tempo (renderizada inline, fora de iframe) */
   .timeline-scroll::-webkit-scrollbar {{ width: 7px; }}
   .timeline-scroll::-webkit-scrollbar-thumb {{ background: #233252; border-radius: 99px; }}
   .timeline-scroll::-webkit-scrollbar-track {{ background: transparent; }}
@@ -152,27 +143,18 @@ if "rede" not in st.session_state:
 
 @st.cache_resource
 def _faixa_portas():
-    """Contador da faixa de portas, compartilhado entre sessões e reloads.
-
-    Precisa sobreviver ao F5: o session_state zera no reload, mas os nós do
-    anel antigo (threads do MESMO processo do Streamlit) continuam vivos
-    segurando as portas. Se o contador voltasse ao início, todos os binds do
-    anel novo falhariam e ele nasceria morto. Com cache_resource, o contador
-    vive no processo do servidor e cada anel novo sempre pega faixa virgem.
-    """
+    # Sobrevive ao F5: session_state zera no reload, mas threads do anel antigo
+    # continuam segurando as portas. O contador em cache_resource garante que
+    # cada anel novo use uma faixa virgem (evita WinError 10048).
     return {"base": 6001}
 
 
 def _criar_rede(n: int, delay: float, auto: bool, embaralhar: bool):
     if st.session_state.rede:
         st.session_state.rede.parar_todos()
-    # Cada anel novo usa uma FAIXA DE PORTAS DIFERENTE. Esse é o conserto-raiz do
-    # WinError 10048 ("endereço já em uso") ao reiniciar: em vez de tentar rebindar
-    # as MESMAS portas (cujos sockets antigos ainda podem estar fechando no Windows),
-    # simplesmente saltamos para portas livres. Não precisa de sleep nem de gambiarra.
     faixa = _faixa_portas()
     base = faixa["base"]
-    faixa["base"] = base + 100  # próxima criação salta de faixa
+    faixa["base"] = base + 100
     ids = list(range(1, n + 1))
     if embaralhar:
         random.shuffle(ids)
@@ -189,10 +171,6 @@ def _criar_rede(n: int, delay: float, auto: bool, embaralhar: bool):
 
 # ── SVG inline do anel ────────────────────────────────────────────────────────
 def _svg_anel(estados, transitos) -> str:
-    """SVG inline (para st.markdown). A mensagem em trânsito é indicada pela
-    SETA DOURADA na aresta correspondente (sem bolinha animada). Quando o salto
-    pula um sucessor morto (nós não adjacentes), desenhamos uma seta dourada
-    tracejada cortando o anel — senão o salto ficaria invisível."""
     n = len(estados)
     if n == 0:
         return f'<div style="background:{PANEL2};border-radius:14px;height:380px;"></div>'
@@ -221,7 +199,6 @@ def _svg_anel(estados, transitos) -> str:
     </defs>""")
 
     def _linha(a, b, hot, tracejada=False):
-        """Linha de a->b com seta na ponta, encostando na borda dos círculos."""
         x1, y1 = pos[a];  x2, y2 = pos[b]
         dx, dy = x2 - x1, y2 - y1
         dist   = math.hypot(dx, dy) or 1
@@ -236,7 +213,6 @@ def _svg_anel(estados, transitos) -> str:
         return (f'<line x1="{sx:.1f}" y1="{sy:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" '
                 f'stroke="{color}" stroke-width="{width}" marker-end="{marker}"{dash}/>')
 
-    # arestas do anel (vizinhos imediatos)
     adjacentes = set()
     for i in range(n):
         a = estados[i]["id"]
@@ -245,14 +221,11 @@ def _svg_anel(estados, transitos) -> str:
         hot = any(t.get("de") == a and t.get("para") == b for t in transitos)
         p.append(_linha(a, b, hot))
 
-    # saltos que PULAM nós mortos (de->para não adjacentes): seta tracejada
-    # cortando o anel, para o salto não ficar invisível.
     for t in transitos:
         de, para = t.get("de"), t.get("para")
         if de in pos and para in pos and (de, para) not in adjacentes:
             p.append(_linha(de, para, hot=True, tracejada=True))
 
-    # nós
     for e in estados:
         x, y     = pos[e["id"]]
         dead     = not e["ativo"]
@@ -299,11 +272,6 @@ def _svg_anel(estados, transitos) -> str:
 
 # ── banner de fase e linha do tempo (helpers de renderização) ──────────────────
 def _banner_fase(em_curso, tp, transito, lider, qtd_ativos):
-    """Título, subtítulo e cores do banner de fase.
-
-    Função PURA (não toca em session_state): recebe o estado já resolvido e
-    devolve a tupla (titulo, subtitulo, cor_borda, cor_fundo, cor_texto).
-    """
     GOLD_BG = "rgba(243,183,60,.07)"
     if em_curso and tp == "ELEICAO" and transito:
         return ("Fase 1 — Eleição",
@@ -338,7 +306,6 @@ def _banner_fase(em_curso, tp, transito, lider, qtd_ativos):
 
 
 def _timeline_html(logs) -> str:
-    """Monta o HTML (inline) da linha do tempo a partir dos logs."""
     kind_c = {
         "eleicao": GOLD, "coordenador": BLUE,
         "falha": RED, "sistema": MUTED, "info": MUTED,
@@ -360,9 +327,8 @@ def _timeline_html(logs) -> str:
     empty = (f'<div style="color:{FAINT};font-size:12px;text-align:center;padding:40px 10px;">'
              f'Os eventos aparecerão aqui em tempo real.</div>')
 
-    # HTML inline (st.markdown) em vez de components.html: o iframe era recriado
-    # do zero a cada atualização do fragmento (flash visível na coluna). Inline,
-    # o Streamlit atualiza o DOM por diff e a lista muda suavemente.
+    # st.markdown interpreta Markdown: linha em branco encerra o bloco HTML e
+    # linhas com 4+ espaços viram código. Colapsamos em uma linha para evitar isso.
     html = (
         f'<div style="background:{PANEL};border:1px solid {BORDERS};'
         f'border-radius:14px;padding:13px;">'
@@ -378,9 +344,6 @@ def _timeline_html(logs) -> str:
         f'{"".join(rows) if rows else empty}'
         f'</div></div>'
     )
-    # CUIDADO: st.markdown interpreta Markdown. Linha em branco encerra o bloco
-    # HTML e linhas indentadas (4+ espaços) viram bloco de código — por isso
-    # colapsamos tudo numa linha só.
     return "".join(line.strip() for line in html.splitlines())
 
 
@@ -442,7 +405,6 @@ with st.sidebar:
 # ── layout principal ──────────────────────────────────────────────────────────
 rede = st.session_state.rede
 
-# ── sem anel criado ───────────────────────────────────────────────────────────
 if rede is None:
     st.markdown(f"""
     <div style="background:{PANEL};border:1px solid {BORDERS};border-radius:14px;
@@ -456,16 +418,13 @@ if rede is None:
     st.stop()
 
 
-# ── fragmento ao vivo ─────────────────────────────────────────────────────────
-# 0.25s de intervalo: menor que o passo_delay mínimo (0.2s da barra lateral),
-# para nenhum salto passar despercebido entre duas atualizações.
+# 0.25s: menor que o passo_delay mínimo (0.2s), para nenhum salto passar despercebido.
 @st.fragment(run_every=0.25)
 def _live():
     estados = rede.estados()
     with rede.lock:
         transitos = [dict(t) for t in rede.transitos.values()]
         logs      = list(rede.logs)
-    # Para o banner usamos o voo mais recente (pode haver mais de um no anel).
     transito = max(transitos, key=lambda t: t.get("inicio", 0)) if transitos else None
 
     lider       = rede.lider_atual()
@@ -474,20 +433,16 @@ def _live():
     mortos      = [e for e in estados if not e["ativo"]]
     qtd_ativos  = len(ativos)
 
-    # colunas criadas dentro do fragmento
     col_ring, col_log = st.columns([1.9, 1.3])
 
-    # ── coluna central ─────────────────────────────────────────────────────────
     with col_ring:
-        # banner de fase
-        # Entre um salto e outro o trânsito fica vazio por um instante; sem a
-        # "memória" abaixo, o banner alternava entre "Fase 1/2" e o texto
-        # genérico várias vezes por segundo (efeito de pisca-pisca).
         tp = transito.get("tipo") if transito else None
         if em_curso:
             if tp:
                 st.session_state.fase_atual = tp
             else:
+                # "Memória" de fase: sem isso o banner pisca entre "Fase 1/2" e o
+                # texto genérico enquanto a mensagem viaja entre dois saltos.
                 tp = st.session_state.get("fase_atual")
         else:
             st.session_state.fase_atual = None
@@ -503,25 +458,10 @@ def _live():
         </div>
         """, unsafe_allow_html=True)
 
-        # barra de ações
         ids_ativos = [e["id"] for e in ativos]
         ids_mortos = [e["id"] for e in mortos]
 
-        ca, cb, cc = st.columns(3)
-        with ca:
-            with st.container(border=True):
-                st.markdown(f'<div style="font-size:11.5px;font-weight:700;color:{BLUE2};">'
-                            f'Iniciar eleição</div>', unsafe_allow_html=True)
-                if ids_ativos:
-                    # Sem escolher o iniciador: a eleição em anel não depende de um
-                    # nó específico — qualquer nó vivo pode começar. Sorteamos um
-                    # ao acaso para deixar isso claro na demonstração.
-                    st.caption("A partir de um nó qualquer do anel.")
-                    if st.button("Iniciar", use_container_width=True, key="btn_ini"):
-                        rede.iniciar_eleicao_em(random.choice(ids_ativos))
-                else:
-                    st.caption("Nenhum nó ativo.")
-
+        cb, cc = st.columns(2)
         with cb:
             with st.container(border=True):
                 st.markdown(f'<div style="font-size:11.5px;font-weight:700;color:{RED2};">'
@@ -551,11 +491,8 @@ def _live():
                     st.caption("Nenhum nó caído.")
 
         st.markdown("<div style='margin:4px 0;'></div>", unsafe_allow_html=True)
-
-        # SVG inline do anel
         st.markdown(_svg_anel(estados, transitos), unsafe_allow_html=True)
 
-    # ── coluna direita: timeline ────────────────────────────────────────────────
     with col_log:
         st.markdown(_timeline_html(logs), unsafe_allow_html=True)
 
